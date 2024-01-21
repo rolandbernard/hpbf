@@ -6,6 +6,8 @@ use std::{
     ptr,
 };
 
+use crate::{Block, Instr};
+
 /// Context for the Brainfuck execution environment.
 #[repr(C)]
 pub struct Context<'a> {
@@ -132,6 +134,44 @@ impl<'a> Context<'a> {
     }
 }
 
+impl<'a> Context<'a> {
+    /// Interpreter based execution engine for Brainfuck.
+    pub fn execute(&mut self, program: &Block) {
+        for instr in program {
+            match instr {
+                Instr::Move(offset) => {
+                    self.mov(*offset);
+                }
+                Instr::Load(val, dst) => {
+                    self.write(*dst, *val);
+                }
+                Instr::Add(val, dst) => {
+                    self.write(*dst, self.read(*dst).wrapping_add(*val));
+                }
+                Instr::MulAdd(val, src, dst) => {
+                    self.write(
+                        *dst,
+                        self.read(*dst)
+                            .wrapping_add(val.wrapping_mul(self.read(*src))),
+                    );
+                }
+                Instr::Output(src) => {
+                    self.output(self.read(*src));
+                }
+                Instr::Input(dst) => {
+                    let val = self.input();
+                    self.write(*dst, val);
+                }
+                Instr::Loop(cond, block) => {
+                    while self.read(*cond) != 0 {
+                        self.execute(block);
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl<'a> Drop for Context<'a> {
     fn drop(&mut self) {
         let old_size = self.mem_high as usize - self.mem_low as usize;
@@ -147,7 +187,7 @@ impl<'a> Drop for Context<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::Context;
+    use crate::{parse, Context, Error};
 
     #[test]
     fn reading_unused_cells_return_zero() {
@@ -240,5 +280,18 @@ mod tests {
         assert_eq!(ctx.input(), 42);
         assert_eq!(ctx.input(), 1);
         assert_eq!(ctx.input(), 3);
+    }
+
+    #[test]
+    fn simple_execution() -> Result<(), Error> {
+        let mut buf = Vec::new();
+        let mut ctx = Context::new(None, Some(Box::new(&mut buf)));
+        ctx.execute(&parse(
+            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
+            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
+        )?);
+        drop(ctx);
+        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
+        Ok(())
     }
 }

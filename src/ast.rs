@@ -8,19 +8,13 @@ pub type Block = Vec<Instr>;
 /// in Brainfuck and help the backend to generate better code.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Instr {
-    // Basic instructions of Brainfuck:
-    Inp,
-    Out,
-    Inc(u8),
     Move(isize),
-    Loop(Block),
-    // Non-local instructions used for optimization:
     Load(u8, isize),
     Add(u8, isize),
     MulAdd(u8, isize, isize),
     Output(isize),
     Input(isize),
-    While(isize, Block),
+    Loop(isize, Block),
 }
 
 /// Kind of error that might be encountered during the parsing of a Brainfuck
@@ -51,16 +45,17 @@ pub struct Error {
 /// let prog = parse("+[-->-[>>+>-----<<]<--<---]>-.>>>+.>>..+++[.>]<<<<.+++.------.<<-.>>>>+.")?;
 ///
 /// assert_eq!(prog, vec![
-///     Inc(1),
-///     Loop(vec![
-///         Inc(254), Move(1), Inc(255),
-///         Loop(vec![Move(2), Inc(1), Move(1), Inc(251), Move(-2)]),
-///         Move(-1), Inc(254), Move(-1), Inc(253),
+///     Add(1, 0),
+///     Loop(0, vec![
+///         Add(254, 0), Move(1), Add(255, 0),
+///         Loop(0, vec![Move(2), Add(1, 0), Move(1), Add(251, 0), Move(-2)]),
+///         Move(-1), Add(254, 0), Move(-1), Add(253, 0),
 ///     ]),
-///     Move(1), Inc(255), Out, Move(3), Inc(1), Out, Move(2), Out, Out, Inc(3),
-///     Loop(vec![Out, Move(1)]),
-///     Move(-4), Out, Inc(3), Out, Inc(250), Out,
-///     Move(-2), Inc(255), Out, Move(4), Inc(1), Out,
+///     Move(1), Add(255, 0), Output(0), Move(3), Add(1, 0), Output(0),
+///     Move(2), Output(0), Output(0), Add(3, 0),
+///     Loop(0, vec![Output(0), Move(1)]),
+///     Move(-4), Output(0), Add(3, 0), Output(0), Add(250, 0), Output(0),
+///     Move(-2), Add(255, 0), Output(0), Move(4), Add(1, 0), Output(0),
 /// ]);
 /// # Ok::<(), Error>(())
 /// ```
@@ -85,24 +80,24 @@ pub fn parse(program: &str) -> Result<Block, Error> {
                 }
             }
             '+' => {
-                if let Some(Instr::Inc(i)) = block.last_mut() {
+                if let Some(Instr::Add(i, 0)) = block.last_mut() {
                     *i = i.wrapping_add(1);
                 } else {
-                    block.push(Instr::Inc(1));
+                    block.push(Instr::Add(1, 0));
                 }
             }
             '-' => {
-                if let Some(Instr::Inc(i)) = block.last_mut() {
+                if let Some(Instr::Add(i, 0)) = block.last_mut() {
                     *i = i.wrapping_sub(1);
                 } else {
-                    block.push(Instr::Inc(255));
+                    block.push(Instr::Add(255, 0));
                 }
             }
             '.' => {
-                block.push(Instr::Out);
+                block.push(Instr::Output(0));
             }
             ',' => {
-                block.push(Instr::Inp);
+                block.push(Instr::Input(0));
             }
             '[' => {
                 positions.push(i);
@@ -116,7 +111,7 @@ pub fn parse(program: &str) -> Result<Block, Error> {
                     });
                 } else {
                     positions.pop();
-                    let instr = Instr::Loop(blocks.pop().unwrap());
+                    let instr = Instr::Loop(0, blocks.pop().unwrap());
                     blocks.last_mut().unwrap().push(instr);
                 }
             }
@@ -144,14 +139,14 @@ mod tests {
         assert_eq!(
             prog,
             vec![
-                Inc(5),
-                Loop(vec![
+                Add(5, 0),
+                Loop(0, vec![
                     Move(1),
-                    Loop(vec![Inc(255)]),
-                    Inp,
-                    Out,
+                    Loop(0, vec![Add(255, 0)]),
+                    Input(0),
+                    Output(0),
                     Move(-1),
-                    Inc(254),
+                    Add(254, 0),
                 ]),
             ]
         );
