@@ -139,7 +139,7 @@ mod tests {
     use Instr::*;
 
     #[test]
-    fn parse_brainfuck() -> Result<(), Error> {
+    fn parsing_valid_brainfuck_returns_block() -> Result<(), Error> {
         let prog = parse("+++++[>[-],.<--]")?;
         assert_eq!(
             prog,
@@ -159,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_missing_closing() {
+    fn parsing_with_missing_closing_returns_error() {
         let prog = parse("+++++[>[-],.<--");
         assert_eq!(
             prog,
@@ -171,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_missing_opening() {
+    fn parsing_with_missing_opening_return_error() {
         let prog = parse("+++++>[-],.<]--");
         assert_eq!(
             prog,
