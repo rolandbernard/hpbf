@@ -1,3 +1,5 @@
+//! Contains parsing and optimizing transformations for a Brainfuck program.
+
 /// Represents a complete Brainfuck program or inside of a loop.
 pub type Block = Vec<Instr>;
 
@@ -23,7 +25,7 @@ pub enum Instr {
 
 /// Kind of error that might be encountered during the parsing of a Brainfuck
 /// program.
-#[derive(Debug)]
+#[derive(PartialEq, Debug)]
 pub enum ErrorKind {
     LoopNotClosed,
     LoopNotOpened,
@@ -31,7 +33,7 @@ pub enum ErrorKind {
 
 /// Error that might be encountered during the parsing of a Brainfuck program.
 /// Contains the index of the character that caused the error.
-#[derive(Debug)]
+#[derive(PartialEq, Debug)]
 pub struct Error {
     pub kind: ErrorKind,
     pub position: usize,
@@ -40,14 +42,14 @@ pub struct Error {
 /// Parses a string containing a Brainfuck program into an internal
 /// representation. This will already cluster sequential increment, decrement,
 /// and movement instructions.
-/// 
+///
 /// # Examples
 /// ```
 /// # use hpbf::ast::{parse, Error, Instr};
 /// use Instr::*;
-/// 
+///
 /// let prog = parse("+[-->-[>>+>-----<<]<--<---]>-.>>>+.>>..+++[.>]<<<<.+++.------.<<-.>>>>+.")?;
-/// 
+///
 /// assert_eq!(prog, vec![
 ///     Inc(1),
 ///     Loop(vec![
@@ -128,5 +130,55 @@ pub fn parse(program: &str) -> Result<Block, Error> {
             kind: ErrorKind::LoopNotClosed,
             position: *positions.last().unwrap(),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse, Error, ErrorKind, Instr};
+    use Instr::*;
+
+    #[test]
+    fn parse_brainfuck() -> Result<(), Error> {
+        let prog = parse("+++++[>[-],.<--]")?;
+        assert_eq!(
+            prog,
+            vec![
+                Inc(5),
+                Loop(vec![
+                    Move(1),
+                    Loop(vec![Inc(255)]),
+                    Inp,
+                    Out,
+                    Move(-1),
+                    Inc(254),
+                ]),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_missing_closing() {
+        let prog = parse("+++++[>[-],.<--");
+        assert_eq!(
+            prog,
+            Err(Error {
+                kind: ErrorKind::LoopNotClosed,
+                position: 5
+            })
+        );
+    }
+
+    #[test]
+    fn parse_missing_opening() {
+        let prog = parse("+++++>[-],.<]--");
+        assert_eq!(
+            prog,
+            Err(Error {
+                kind: ErrorKind::LoopNotOpened,
+                position: 12
+            })
+        );
     }
 }
