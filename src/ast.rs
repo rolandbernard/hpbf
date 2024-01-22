@@ -1,5 +1,7 @@
 //! Contains parsing and optimizing transformations for a Brainfuck program.
 
+use crate::{Error, ErrorKind};
+
 /// Represents a complete Brainfuck program or inside of a loop.
 pub type Block = Vec<Instr>;
 
@@ -15,22 +17,6 @@ pub enum Instr {
     Output(isize),
     Input(isize),
     Loop(isize, Block),
-}
-
-/// Kind of error that might be encountered during the parsing of a Brainfuck
-/// program.
-#[derive(PartialEq, Debug)]
-pub enum ErrorKind {
-    LoopNotClosed,
-    LoopNotOpened,
-}
-
-/// Error that might be encountered during the parsing of a Brainfuck program.
-/// Contains the index of the character that caused the error.
-#[derive(PartialEq, Debug)]
-pub struct Error {
-    pub kind: ErrorKind,
-    pub position: usize,
 }
 
 /// Parses a string containing a Brainfuck program into an internal

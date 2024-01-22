@@ -118,6 +118,7 @@ impl<'a> Context<'a> {
     }
 
     /// Input one byte from standard input.
+    #[cold]
     pub fn input(&mut self) -> u8 {
         let mut result = [0];
         if let Some(input) = &mut self.input {
@@ -127,6 +128,7 @@ impl<'a> Context<'a> {
     }
 
     /// Output one byte to standard output.
+    #[cold]
     pub fn output(&mut self, value: u8) {
         if let Some(output) = &mut self.output {
             output.write(&[value]).ok();
