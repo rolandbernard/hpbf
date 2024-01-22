@@ -1,22 +1,22 @@
 //! Contains parsing and optimizing transformations for a Brainfuck program.
 
-use crate::{Error, ErrorKind};
+use crate::{CellType, Error, ErrorKind};
 
 /// Represents a complete Brainfuck program or inside of a loop.
-pub type Block = Vec<Instr>;
+pub type Block<C> = Vec<Instr<C>>;
 
 /// This represents a Brainfuck instruction. It includes not only the basic
 /// Brainfuck instructions, but also some additional operations that are common
 /// in Brainfuck and help the backend to generate better code.
 #[derive(Clone, PartialEq, Debug)]
-pub enum Instr {
+pub enum Instr<C: CellType> {
     Move(isize),
-    Load(u8, isize),
-    Add(u8, isize),
-    MulAdd(u8, isize, isize),
+    Load(C, isize),
+    Add(C, isize),
+    MulAdd(C, isize, isize),
     Output(isize),
     Input(isize),
-    Loop(isize, Block),
+    Loop(isize, Block<C>),
 }
 
 /// Parses a string containing a Brainfuck program into an internal
@@ -25,10 +25,10 @@ pub enum Instr {
 ///
 /// # Examples
 /// ```
-/// # use hpbf::ast::{parse, Error, Instr};
+/// # use hpbf::{parse, Error, Instr};
 /// use Instr::*;
 ///
-/// let prog = parse("+[-->-[>>+>-----<<]<--<---]>-.>>>+.>>..+++[.>]<<<<.+++.------.<<-.>>>>+.")?;
+/// let prog = parse::<u8>("+[-->-[>>+>-----<<]<--<---]>-.>>>+.>>..+++[.>]<<<<.+++.------.<<-.>>>>+.")?;
 ///
 /// assert_eq!(prog, vec![
 ///     Add(1, 0),
@@ -45,8 +45,8 @@ pub enum Instr {
 /// ]);
 /// # Ok::<(), Error>(())
 /// ```
-pub fn parse(program: &str) -> Result<Block, Error> {
-    let mut blocks = vec![Block::new()];
+pub fn parse<C: CellType>(program: &str) -> Result<Block<C>, Error> {
+    let mut blocks = vec![Block::<C>::new()];
     let mut positions = vec![];
     for (i, char) in program.chars().enumerate() {
         let block = blocks.last_mut().unwrap();
@@ -67,16 +67,16 @@ pub fn parse(program: &str) -> Result<Block, Error> {
             }
             '+' => {
                 if let Some(Instr::Add(i, 0)) = block.last_mut() {
-                    *i = i.wrapping_add(1);
+                    *i = i.wrapping_add(C::ONE);
                 } else {
-                    block.push(Instr::Add(1, 0));
+                    block.push(Instr::Add(C::ONE, 0));
                 }
             }
             '-' => {
                 if let Some(Instr::Add(i, 0)) = block.last_mut() {
-                    *i = i.wrapping_sub(1);
+                    *i = i.wrapping_add(C::NEG_ONE);
                 } else {
-                    block.push(Instr::Add(255, 0));
+                    block.push(Instr::Add(C::NEG_ONE, 0));
                 }
             }
             '.' => {
@@ -121,19 +121,22 @@ mod tests {
 
     #[test]
     fn parsing_valid_brainfuck_returns_block() -> Result<(), Error> {
-        let prog = parse("+++++[>[-],.<--]")?;
+        let prog = parse::<u8>("+++++[>[-],.<--]")?;
         assert_eq!(
             prog,
             vec![
                 Add(5, 0),
-                Loop(0, vec![
-                    Move(1),
-                    Loop(0, vec![Add(255, 0)]),
-                    Input(0),
-                    Output(0),
-                    Move(-1),
-                    Add(254, 0),
-                ]),
+                Loop(
+                    0,
+                    vec![
+                        Move(1),
+                        Loop(0, vec![Add(255, 0)]),
+                        Input(0),
+                        Output(0),
+                        Move(-1),
+                        Add(254, 0),
+                    ]
+                ),
             ]
         );
         Ok(())
@@ -141,7 +144,7 @@ mod tests {
 
     #[test]
     fn parsing_with_missing_closing_returns_error() {
-        let prog = parse("+++++[>[-],.<--");
+        let prog = parse::<u8>("+++++[>[-],.<--");
         assert_eq!(
             prog,
             Err(Error {
@@ -153,7 +156,7 @@ mod tests {
 
     #[test]
     fn parsing_with_missing_opening_return_error() {
-        let prog = parse("+++++>[-],.<]--");
+        let prog = parse::<u8>("+++++>[-],.<]--");
         assert_eq!(
             prog,
             Err(Error {

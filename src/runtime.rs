@@ -3,22 +3,22 @@
 use std::{
     alloc::{alloc_zeroed, dealloc, Layout},
     io::{stdin, stdout, Read, Write},
-    ptr,
+    mem, ptr,
 };
 
-use crate::{Block, Instr};
+use crate::{Block, CellType, Instr};
 
 /// Context for the Brainfuck execution environment.
 #[repr(C)]
-pub struct Context<'a> {
-    mem_low: *mut u8,
-    mem_high: *mut u8,
-    mem_ptr: *mut u8,
+pub struct Context<'a, C: CellType> {
+    mem_low: *mut C,
+    mem_high: *mut C,
+    mem_ptr: *mut C,
     input: Option<Box<dyn Read + 'a>>,
     output: Option<Box<dyn Write + 'a>>,
 }
 
-impl<'a> Context<'a> {
+impl<'a, C: CellType> Context<'a, C> {
     /// Create a new context for executing a Brainfuck program.
     pub fn new(input: Option<Box<dyn Read + 'a>>, output: Option<Box<dyn Write + 'a>>) -> Self {
         Context {
@@ -48,19 +48,21 @@ impl<'a> Context<'a> {
     /// Read from the given offset from the current pointer. Reading from
     /// outside the currently allocated memory buffer will not allocate new
     /// memory, but immediately return zero.
-    pub fn read(&self, offset: isize) -> u8 {
+    pub fn read(&self, offset: isize) -> C {
         let ptr = self.mem_ptr.wrapping_offset(offset);
         if self.mem_low <= ptr && ptr < self.mem_high {
             // SAFETY: The area from `mem_low` to `mem_high` can safely be accessed.
             unsafe { ptr.read() }
         } else {
-            0
+            C::ZERO
         }
     }
 
     fn make_accessible(&mut self, min: isize, max: isize) {
-        let old_size = self.mem_high as isize - self.mem_low as isize;
-        let old_ptr = self.mem_ptr as isize - self.mem_low as isize;
+        let old_size =
+            (self.mem_high as isize - self.mem_low as isize) / mem::size_of::<C>() as isize;
+        let old_ptr =
+            (self.mem_ptr as isize - self.mem_low as isize) / mem::size_of::<C>() as isize;
         let min_ptr = old_ptr + min;
         let max_ptr = old_ptr + max + 1;
         let needed_below = if min_ptr < 0 { min_ptr.abs() } else { 0 };
@@ -77,18 +79,20 @@ impl<'a> Context<'a> {
         let added_below = match (needed_below, needed_above) {
             (0, _) => 0,
             (_, 0) => new_size - old_size,
-            (_, _) => (new_size - old_size) / 2,
+            (_, _) => needed_below
+                .max((new_size - old_size) / 2)
+                .min(new_size - old_size - needed_above),
         };
-        let new_layout = Layout::array::<u8>(new_size as usize).unwrap();
+        let new_layout = Layout::array::<C>(new_size as usize).unwrap();
         // SAFETY: Layout is never zero-sized.
-        let new_buffer = unsafe { alloc_zeroed(new_layout) };
+        let new_buffer = unsafe { alloc_zeroed(new_layout) as *mut C };
         if old_size != 0 {
             // SAFETY: If the old size is non-zero, the old region is valid.
             unsafe {
                 self.mem_low
                     .copy_to_nonoverlapping(new_buffer.offset(added_below), old_size as usize);
-                let old_layout = Layout::array::<u8>(old_size as usize).unwrap();
-                dealloc(self.mem_low, old_layout);
+                let old_layout = Layout::array::<C>(old_size as usize).unwrap();
+                dealloc(self.mem_low as *mut u8, old_layout);
             }
         }
         self.mem_low = new_buffer;
@@ -98,7 +102,7 @@ impl<'a> Context<'a> {
     }
 
     #[cold]
-    fn write_out_of_bounds(&mut self, offset: isize, value: u8) {
+    fn write_out_of_bounds(&mut self, offset: isize, value: C) {
         self.make_accessible(offset, offset);
         let ptr = self.mem_ptr.wrapping_offset(offset);
         // SAFETY: `make_accessible` ensures that `ptr` can be written safely.
@@ -107,7 +111,7 @@ impl<'a> Context<'a> {
 
     /// Write to the given offset from the current pointer. If the currently
     /// allocated memory buffer is exceeded, new memory will be allocated.
-    pub fn write(&mut self, offset: isize, value: u8) {
+    pub fn write(&mut self, offset: isize, value: C) {
         let ptr = self.mem_ptr.wrapping_offset(offset);
         if self.mem_low <= ptr && ptr < self.mem_high {
             // SAFETY: The area from `mem_low` to `mem_high` can safely be accessed.
@@ -136,9 +140,9 @@ impl<'a> Context<'a> {
     }
 }
 
-impl<'a> Context<'a> {
+impl<'a, C: CellType> Context<'a, C> {
     /// Interpreter based execution engine for Brainfuck.
-    pub fn execute(&mut self, program: &Block) {
+    pub fn execute(&mut self, program: &Block<C>) {
         for instr in program {
             match instr {
                 Instr::Move(offset) => {
@@ -158,14 +162,14 @@ impl<'a> Context<'a> {
                     );
                 }
                 Instr::Output(src) => {
-                    self.output(self.read(*src));
+                    self.output(self.read(*src).into_u8());
                 }
                 Instr::Input(dst) => {
                     let val = self.input();
-                    self.write(*dst, val);
+                    self.write(*dst, C::from_u8(val));
                 }
                 Instr::Loop(cond, block) => {
-                    while self.read(*cond) != 0 {
+                    while self.read(*cond) != C::ZERO {
                         self.execute(block);
                     }
                 }
@@ -174,14 +178,14 @@ impl<'a> Context<'a> {
     }
 }
 
-impl<'a> Drop for Context<'a> {
+impl<'a, C: CellType> Drop for Context<'a, C> {
     fn drop(&mut self) {
-        let old_size = self.mem_high as usize - self.mem_low as usize;
+        let old_size = (self.mem_high as usize - self.mem_low as usize) / mem::size_of::<C>();
         if old_size != 0 {
             // SAFETY: If the old size is non-zero, the old region is valid.
             unsafe {
-                let old_layout = Layout::array::<u8>(old_size).unwrap();
-                dealloc(self.mem_low, old_layout);
+                let old_layout = Layout::array::<C>(old_size).unwrap();
+                dealloc(self.mem_low as *mut u8, old_layout);
             }
         }
     }
@@ -193,7 +197,7 @@ mod tests {
 
     #[test]
     fn reading_unused_cells_return_zero() {
-        let ctx = Context::without_io();
+        let ctx = Context::<u8>::without_io();
         assert_eq!(ctx.read(0), 0);
         assert_eq!(ctx.read(1), 0);
         assert_eq!(ctx.read(100), 0);
@@ -203,28 +207,28 @@ mod tests {
 
     #[test]
     fn initial_cell_reads_written_value() {
-        let mut ctx = Context::without_io();
+        let mut ctx = Context::<u8>::without_io();
         ctx.write(0, 100);
         assert_eq!(ctx.read(0), 100);
     }
 
     #[test]
     fn positive_cell_reads_written_value() {
-        let mut ctx = Context::without_io();
+        let mut ctx = Context::<u8>::without_io();
         ctx.write(100, 42);
         assert_eq!(ctx.read(100), 42);
     }
 
     #[test]
     fn negative_cell_reads_written_value() {
-        let mut ctx = Context::without_io();
+        let mut ctx = Context::<u8>::without_io();
         ctx.write(-100, 42);
         assert_eq!(ctx.read(-100), 42);
     }
 
     #[test]
     fn resizes_preserve_pointer() {
-        let mut ctx = Context::without_io();
+        let mut ctx = Context::<u8>::without_io();
         ctx.write(-100, 1);
         assert_eq!(ctx.read(-100), 1);
         ctx.write(100, 2);
@@ -243,7 +247,7 @@ mod tests {
 
     #[test]
     fn pointer_movements_affect_read_and_write() {
-        let mut ctx = Context::without_io();
+        let mut ctx = Context::<u8>::without_io();
         ctx.mov(-100);
         ctx.write(0, 1);
         assert_eq!(ctx.read(0), 1);
@@ -267,7 +271,7 @@ mod tests {
     #[test]
     fn output_writes_to_output() {
         let mut buf = Vec::new();
-        let mut ctx = Context::new(None, Some(Box::new(&mut buf)));
+        let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
         ctx.output(42);
         ctx.output(1);
         ctx.output(3);
@@ -278,7 +282,7 @@ mod tests {
     #[test]
     fn input_reads_from_input() {
         let buf = vec![42, 1, 3];
-        let mut ctx = Context::new(Some(Box::new(buf.as_slice())), None);
+        let mut ctx = Context::<u8>::new(Some(Box::new(buf.as_slice())), None);
         assert_eq!(ctx.input(), 42);
         assert_eq!(ctx.input(), 1);
         assert_eq!(ctx.input(), 3);
@@ -287,7 +291,46 @@ mod tests {
     #[test]
     fn simple_execution() -> Result<(), Error> {
         let mut buf = Vec::new();
-        let mut ctx = Context::new(None, Some(Box::new(&mut buf)));
+        let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
+        ctx.execute(&parse(
+            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
+            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
+        )?);
+        drop(ctx);
+        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
+        Ok(())
+    }
+
+    #[test]
+    fn simple_execution_u16() -> Result<(), Error> {
+        let mut buf = Vec::new();
+        let mut ctx = Context::<u16>::new(None, Some(Box::new(&mut buf)));
+        ctx.execute(&parse(
+            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
+            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
+        )?);
+        drop(ctx);
+        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
+        Ok(())
+    }
+
+    #[test]
+    fn simple_execution_u32() -> Result<(), Error> {
+        let mut buf = Vec::new();
+        let mut ctx = Context::<u32>::new(None, Some(Box::new(&mut buf)));
+        ctx.execute(&parse(
+            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
+            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
+        )?);
+        drop(ctx);
+        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
+        Ok(())
+    }
+
+    #[test]
+    fn simple_execution_u64() -> Result<(), Error> {
+        let mut buf = Vec::new();
+        let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
         ctx.execute(&parse(
             ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
             +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
