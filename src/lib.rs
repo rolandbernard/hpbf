@@ -1,8 +1,8 @@
-pub mod ast;
-pub mod codegen;
-pub mod runtime;
+mod ast;
+mod codegen;
+mod runtime;
 
-pub use ast::{parse, Block, Instr};
+pub use ast::{optimize, parse, Block, Instr};
 pub use runtime::Context;
 
 /// Kind of error that might be encountered during the parsing of a Brainfuck
@@ -140,4 +140,3 @@ impl CellType for u64 {
         self.wrapping_mul(rhs)
     }
 }
-

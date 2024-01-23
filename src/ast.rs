@@ -1,5 +1,7 @@
 //! Contains parsing and optimizing transformations for a Brainfuck program.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::{CellType, Error, ErrorKind};
 
 /// Represents a complete Brainfuck program or inside of a loop.
@@ -112,6 +114,154 @@ pub fn parse<C: CellType>(program: &str) -> Result<Block<C>, Error> {
             position: *positions.last().unwrap(),
         });
     }
+}
+
+struct OptimizerContext<C: CellType> {
+    ptr: isize,
+    adds: HashMap<isize, C>,
+    values: HashMap<isize, C>,
+    pending_adds: HashMap<isize, C>,
+    pending_loads: HashMap<isize, C>,
+    modified: HashMap<isize, usize>,
+    written: HashSet<isize>,
+    read: HashSet<isize>,
+}
+
+impl<C: CellType> OptimizerContext<C> {
+    fn new(ptr: isize) -> Self {
+        OptimizerContext::<C> {
+            ptr,
+            adds: HashMap::new(),
+            values: HashMap::new(),
+            pending_adds: HashMap::new(),
+            pending_loads: HashMap::new(),
+            modified: HashMap::new(),
+            read: HashSet::new(),
+            written: HashSet::new(),
+        }
+    }
+
+    fn setup_for_read(&mut self, src: isize, block: &mut Block<C>) {
+        if let Some(&v) = self.pending_loads.get(&src) {
+            block.push(Instr::Load(v, src));
+            self.written.insert(src);
+            self.pending_loads.remove(&src);
+            *self.modified.entry(src).or_insert(0) += 1;
+        } else if let Some(&v) = self.pending_adds.get(&src) {
+            block.push(Instr::Add(v, src));
+            self.pending_adds.remove(&src);
+            *self.modified.entry(src).or_insert(0) += 1;
+        }
+        if !self.written.contains(&src) {
+            self.read.insert(src);
+        }
+    }
+
+    fn finalize_loop(&mut self, known_iters: bool, block: &mut Block<C>) {
+        let mut to_finalize = Vec::new();
+        for dst in self.pending_adds.keys() {
+            if !known_iters || self.read.contains(dst) {
+                to_finalize.push(*dst);
+            }
+        }
+        for dst in self.pending_loads.keys() {
+            if self.read.contains(dst) {
+                to_finalize.push(*dst);
+            }
+        }
+        for dst in to_finalize {
+            self.setup_for_read(dst, block);
+        }
+    }
+
+    fn extract_invariant_loads(&self, src: &mut Block<C>, target: &mut Block<C>) {
+        todo!();
+    }
+
+    fn optimize_block(&mut self, block: Block<C>) -> Block<C> {
+        let mut optimized = Block::new();
+        for instr in block {
+            match instr {
+                Instr::Move(offset) => self.ptr += offset,
+                Instr::Load(val, dst) => {
+                    let dst = dst + self.ptr;
+                    if self.values.get(&dst) != Some(&val) {
+                        self.adds.remove(&dst);
+                        self.pending_adds.remove(&dst);
+                        self.values.insert(dst, val);
+                        self.pending_loads.insert(dst, val);
+                    }
+                }
+                Instr::Add(val, dst) => {
+                    if val != C::ZERO {
+                        let dst = dst + self.ptr;
+                        if let Some(v) = self.values.get_mut(&dst) {
+                            *v = v.wrapping_add(val);
+                            self.pending_loads.insert(dst, *v);
+                        } else {
+                            if !self.written.contains(&dst) {
+                                self.adds
+                                    .entry(dst)
+                                    .and_modify(|v| *v = v.wrapping_add(val))
+                                    .or_insert(val);
+                            }
+                            self.pending_adds
+                                .entry(dst)
+                                .and_modify(|v| *v = v.wrapping_add(val))
+                                .or_insert(val);
+                        }
+                    }
+                }
+                Instr::MulAdd(val, src, dst) => {
+                    if val != C::ZERO {
+                        let src = src + self.ptr;
+                        let dst = dst + self.ptr;
+                        todo!();
+                    }
+                }
+                Instr::Output(src) => {
+                    let src = src + self.ptr;
+                    self.setup_for_read(src, &mut optimized);
+                    optimized.push(Instr::Output(src));
+                }
+                Instr::Input(dst) => {
+                    let dst = dst + self.ptr;
+                    self.pending_adds.remove(&dst);
+                    self.pending_loads.remove(&dst);
+                    self.values.remove(&dst);
+                    optimized.push(Instr::Input(dst));
+                    self.written.insert(dst);
+                }
+                Instr::Loop(cond, sub_block) => {
+                    let cond = cond + self.ptr;
+                    if let Some(&v) = self.values.get(&cond) {
+                        if v == C::ZERO {
+                            // We know that this loop will never be run. Therefore we completely skip it.
+                        } else {
+                            let mut sub_cxt = Self::new(self.ptr);
+                            let mut sub_block = sub_cxt.optimize_block(sub_block);
+                            // TODO: do we need to setup for read?
+                            self.setup_for_read(cond, &mut optimized);
+                        }
+                    } else {
+                        let mut sub_cxt = Self::new(self.ptr);
+                        let mut sub_block = sub_cxt.optimize_block(sub_block);
+                        // TODO: do we need to setup for read?
+                        self.setup_for_read(cond, &mut optimized);
+                    }
+                    self.values.insert(cond, C::ZERO);
+                }
+            }
+        }
+        return optimized;
+    }
+}
+
+/// Optimize the Brainfuck program. It should be noted that the performed
+/// optimizations are very much specific to this vm and use non-brainfuck
+/// instructions. This is mainly a constant propagation pass.
+pub fn optimize<C: CellType>(program: Block<C>) -> Block<C> {
+    return OptimizerContext::new(0).optimize_block(program);
 }
 
 #[cfg(test)]
