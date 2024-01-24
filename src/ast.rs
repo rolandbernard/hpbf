@@ -116,66 +116,264 @@ pub fn parse<C: CellType>(program: &str) -> Result<Block<C>, Error> {
     }
 }
 
-struct OptimizerContext<C: CellType> {
+enum OptimizerValue<C> {
+    UnknownValue,
+    UnknownAddition { pending: C },
+    KnownValue { value: C, pending: bool },
+    KnownAddition { value: C, pending: C },
+}
+
+struct OptimizerContext<C> {
     ptr: isize,
-    adds: HashMap<isize, C>,
-    values: HashMap<isize, C>,
-    pending_adds: HashMap<isize, C>,
-    pending_loads: HashMap<isize, C>,
-    modified: HashMap<isize, usize>,
-    written: HashSet<isize>,
-    read: HashSet<isize>,
+    had_shift: bool,
+    cell_values: HashMap<isize, OptimizerValue<C>>,
+    read_cells: HashSet<isize>,
+    written_cells: HashSet<isize>,
+}
+
+enum OptimizerLoopCount<C: CellType> {
+    Unknown,
+    Finite,
+    Simple,
+    SimpleNegated,
+    AtLeastOnce,
+    AtMostOnce,
+    NeverOrInfinite,
+    Infinite,
+    NTimes(C),
+}
+
+impl<C: CellType> OptimizerLoopCount<C> {
+    fn never(&self) -> bool {
+        match self {
+            OptimizerLoopCount::NTimes(c) if *c == C::ZERO => true,
+            _ => false,
+        }
+    }
+
+    fn at_least_once(&self) -> bool {
+        match self {
+            OptimizerLoopCount::AtLeastOnce => true,
+            OptimizerLoopCount::Infinite => true,
+            OptimizerLoopCount::NTimes(c) if *c != C::ZERO => true,
+            _ => false,
+        }
+    }
+
+    fn at_most_once(&self) -> bool {
+        match self {
+            OptimizerLoopCount::AtMostOnce => true,
+            OptimizerLoopCount::NTimes(c) if *c == C::ZERO || *c == C::ONE => true,
+            _ => false,
+        }
+    }
+
+    fn effects_seen_later(&self) -> bool {
+        match self {
+            OptimizerLoopCount::NeverOrInfinite => false,
+            OptimizerLoopCount::Infinite => false,
+            OptimizerLoopCount::NTimes(c) if *c == C::ZERO => false,
+            _ => true,
+        }
+    }
+
+    fn is_finite(&self) -> bool {
+        match self {
+            OptimizerLoopCount::Finite => true,
+            OptimizerLoopCount::Simple => true,
+            OptimizerLoopCount::SimpleNegated => true,
+            OptimizerLoopCount::AtMostOnce => true,
+            OptimizerLoopCount::NTimes(_) => true,
+            _ => false,
+        }
+    }
 }
 
 impl<C: CellType> OptimizerContext<C> {
     fn new(ptr: isize) -> Self {
         OptimizerContext::<C> {
             ptr,
-            adds: HashMap::new(),
-            values: HashMap::new(),
-            pending_adds: HashMap::new(),
-            pending_loads: HashMap::new(),
-            modified: HashMap::new(),
-            read: HashSet::new(),
-            written: HashSet::new(),
+            had_shift: false,
+            cell_values: HashMap::new(),
+            read_cells: HashSet::new(),
+            written_cells: HashSet::new(),
         }
     }
 
-    fn setup_for_read(&mut self, src: isize, block: &mut Block<C>) {
-        if let Some(&v) = self.pending_loads.get(&src) {
-            block.push(Instr::Load(v, src));
-            self.written.insert(src);
-            self.pending_loads.remove(&src);
-            *self.modified.entry(src).or_insert(0) += 1;
-        } else if let Some(&v) = self.pending_adds.get(&src) {
-            block.push(Instr::Add(v, src));
-            self.pending_adds.remove(&src);
-            *self.modified.entry(src).or_insert(0) += 1;
-        }
-        if !self.written.contains(&src) {
-            self.read.insert(src);
-        }
-    }
-
-    fn finalize_loop(&mut self, known_iters: bool, block: &mut Block<C>) {
-        let mut to_finalize = Vec::new();
-        for dst in self.pending_adds.keys() {
-            if !known_iters || self.read.contains(dst) {
-                to_finalize.push(*dst);
+    fn emit(&mut self, src: isize, block: &mut Block<C>) {
+        match self.cell_values.get_mut(&src) {
+            Some(OptimizerValue::KnownValue { value, pending }) if *pending => {
+                block.push(Instr::Load(*value, src));
+                *pending = false;
+                self.written_cells.insert(src);
+            }
+            Some(
+                OptimizerValue::KnownAddition { pending, .. }
+                | OptimizerValue::UnknownAddition { pending },
+            ) if *pending != C::ZERO => {
+                block.push(Instr::Add(*pending, src));
+                *pending = C::ZERO;
+                self.read_cells.insert(src);
+                self.written_cells.insert(src);
+            }
+            _ => {
+                if !self.written_cells.contains(&src) {
+                    self.read_cells.insert(src);
+                }
             }
         }
-        for dst in self.pending_loads.keys() {
-            if self.read.contains(dst) {
-                to_finalize.push(*dst);
-            }
-        }
-        for dst in to_finalize {
-            self.setup_for_read(dst, block);
+    }
+
+    fn emit_all(&mut self, to_emit: &[isize], block: &mut Block<C>) {
+        for &cell in to_emit {
+            self.emit(cell, block);
         }
     }
 
-    fn extract_invariant_loads(&self, src: &mut Block<C>, target: &mut Block<C>) {
-        todo!();
+    fn pending(&self) -> Vec<isize> {
+        self.cell_values
+            .iter()
+            .filter(|(k, v)| match v {
+                OptimizerValue::KnownValue { value, pending } if *pending => true,
+                OptimizerValue::KnownAddition { pending, .. }
+                | OptimizerValue::UnknownAddition { pending }
+                    if *pending != C::ZERO =>
+                {
+                    true
+                }
+                _ => false,
+            })
+            .map(|(k, _)| *k)
+            .collect()
+    }
+
+    fn read_and_pending(&self) -> Vec<isize> {
+        self.cell_values
+            .iter()
+            .filter(|(k, v)| match v {
+                OptimizerValue::KnownValue { value, pending } if *pending => true,
+                OptimizerValue::KnownAddition { pending, .. }
+                | OptimizerValue::UnknownAddition { pending }
+                    if *pending != C::ZERO =>
+                {
+                    true
+                }
+                _ => false,
+            })
+            .map(|(k, _)| *k)
+            .filter(|dst| self.read_cells.contains(dst))
+            .collect()
+    }
+
+    fn read(&self) -> Vec<isize> {
+        self.read_cells.iter().copied().collect()
+    }
+
+    fn compute_loop_count(&self, cond: isize, sub_cxt: &Self) -> OptimizerLoopCount<C> {
+        if self.ptr != sub_cxt.ptr || sub_cxt.had_shift {
+            OptimizerLoopCount::Unknown
+        } else if let Some(OptimizerValue::KnownValue { value, .. }) = self.cell_values.get(&cond) {
+            if *value == C::ZERO {
+                OptimizerLoopCount::NTimes(C::ZERO)
+            } else {
+                match sub_cxt.cell_values.get(&cond) {
+                    Some(OptimizerValue::KnownValue { value, .. }) => {
+                        if *value == C::ZERO {
+                            OptimizerLoopCount::NTimes(C::ONE)
+                        } else {
+                            OptimizerLoopCount::Infinite
+                        }
+                    }
+                    Some(OptimizerValue::KnownAddition { value: inc, .. }) => {
+                        if let Some(n) = value.wrapping_div(inc.wrapping_negate()) {
+                            OptimizerLoopCount::NTimes(n)
+                        } else {
+                            OptimizerLoopCount::Infinite
+                        }
+                    }
+                    Some(_) => OptimizerLoopCount::AtLeastOnce,
+                    None => OptimizerLoopCount::Infinite,
+                }
+            }
+        } else {
+            match sub_cxt.cell_values.get(&cond) {
+                Some(OptimizerValue::KnownValue { value, .. }) => {
+                    if *value == C::ZERO {
+                        OptimizerLoopCount::AtMostOnce
+                    } else {
+                        OptimizerLoopCount::NeverOrInfinite
+                    }
+                }
+                Some(OptimizerValue::KnownAddition { value: inc, .. }) => {
+                    if *inc == C::NEG_ONE {
+                        OptimizerLoopCount::Simple
+                    } else if *inc == C::ONE {
+                        OptimizerLoopCount::SimpleNegated
+                    } else if *inc == C::ZERO {
+                        OptimizerLoopCount::NeverOrInfinite
+                    } else if inc.is_odd() {
+                        OptimizerLoopCount::Finite
+                    } else {
+                        OptimizerLoopCount::Unknown
+                    }
+                }
+                Some(_) => OptimizerLoopCount::Unknown,
+                None => OptimizerLoopCount::NeverOrInfinite,
+            }
+        }
+    }
+
+    fn load_cell(&mut self, dst: isize, val: C) {
+        match self
+            .cell_values
+            .entry(dst)
+            .or_insert(OptimizerValue::UnknownValue)
+        {
+            a @ (OptimizerValue::UnknownValue
+            | OptimizerValue::UnknownAddition { .. }
+            | OptimizerValue::KnownAddition { .. }) => {
+                *a = OptimizerValue::KnownValue {
+                    value: val,
+                    pending: true,
+                };
+            }
+            OptimizerValue::KnownValue { value, pending } => {
+                if *value != val {
+                    *value = val;
+                    *pending = true;
+                }
+            }
+        }
+    }
+
+    fn add_cell(&mut self, dst: isize, val: C) {
+        if val != C::ZERO {
+            match self
+                .cell_values
+                .entry(dst)
+                .or_insert(OptimizerValue::KnownAddition {
+                    value: C::ZERO,
+                    pending: C::ZERO,
+                }) {
+                a @ OptimizerValue::UnknownValue => {
+                    *a = OptimizerValue::UnknownAddition { pending: val };
+                }
+                OptimizerValue::KnownValue { value, pending } => {
+                    *value = value.wrapping_add(val);
+                    *pending = true;
+                }
+                OptimizerValue::KnownAddition { pending, .. }
+                | OptimizerValue::UnknownAddition { pending } => {
+                    *pending = pending.wrapping_add(val);
+                }
+            }
+        }
+    }
+
+    fn add_mul_cell(&mut self, dst: isize, val: C, src: isize) {
+        if val != C::ZERO {
+            todo!();
+        }
     }
 
     fn optimize_block(&mut self, block: Block<C>) -> Block<C> {
@@ -185,71 +383,99 @@ impl<C: CellType> OptimizerContext<C> {
                 Instr::Move(offset) => self.ptr += offset,
                 Instr::Load(val, dst) => {
                     let dst = dst + self.ptr;
-                    if self.values.get(&dst) != Some(&val) {
-                        self.adds.remove(&dst);
-                        self.pending_adds.remove(&dst);
-                        self.values.insert(dst, val);
-                        self.pending_loads.insert(dst, val);
-                    }
+                    self.load_cell(dst, val);
                 }
                 Instr::Add(val, dst) => {
-                    if val != C::ZERO {
-                        let dst = dst + self.ptr;
-                        if let Some(v) = self.values.get_mut(&dst) {
-                            *v = v.wrapping_add(val);
-                            self.pending_loads.insert(dst, *v);
-                        } else {
-                            if !self.written.contains(&dst) {
-                                self.adds
-                                    .entry(dst)
-                                    .and_modify(|v| *v = v.wrapping_add(val))
-                                    .or_insert(val);
-                            }
-                            self.pending_adds
-                                .entry(dst)
-                                .and_modify(|v| *v = v.wrapping_add(val))
-                                .or_insert(val);
-                        }
-                    }
+                    let dst = dst + self.ptr;
+                    self.add_cell(dst, val);
                 }
                 Instr::MulAdd(val, src, dst) => {
-                    if val != C::ZERO {
-                        let src = src + self.ptr;
-                        let dst = dst + self.ptr;
-                        todo!();
-                    }
+                    let src = src + self.ptr;
+                    let dst = dst + self.ptr;
+                    self.add_mul_cell(dst, val, src);
                 }
                 Instr::Output(src) => {
                     let src = src + self.ptr;
-                    self.setup_for_read(src, &mut optimized);
+                    self.emit(src, &mut optimized);
                     optimized.push(Instr::Output(src));
                 }
                 Instr::Input(dst) => {
                     let dst = dst + self.ptr;
-                    self.pending_adds.remove(&dst);
-                    self.pending_loads.remove(&dst);
-                    self.values.remove(&dst);
                     optimized.push(Instr::Input(dst));
-                    self.written.insert(dst);
+                    self.cell_values.insert(dst, OptimizerValue::UnknownValue);
+                    self.written_cells.insert(dst);
                 }
                 Instr::Loop(cond, sub_block) => {
                     let cond = cond + self.ptr;
-                    if let Some(&v) = self.values.get(&cond) {
-                        if v == C::ZERO {
-                            // We know that this loop will never be run. Therefore we completely skip it.
+                    let mut sub_cxt = Self::new(self.ptr);
+                    let mut sub_block = sub_cxt.optimize_block(sub_block);
+                    let iters = self.compute_loop_count(cond, &sub_cxt);
+                    if !iters.never() {
+                        let ptr_shift = sub_cxt.ptr - self.ptr;
+                        if ptr_shift != 0 || sub_cxt.had_shift {
+                            sub_cxt.emit_all(&sub_cxt.pending(), &mut sub_block);
+                            if ptr_shift != 0 {
+                                sub_block.push(Instr::Move(ptr_shift));
+                            }
+                            self.emit_all(&self.pending(), &mut optimized);
+                            optimized.push(Instr::Loop(cond, sub_block));
+                            self.had_shift = true;
+                            self.cell_values.clear();
+                            self.read_cells.clear();
+                            self.written_cells.clear();
                         } else {
-                            let mut sub_cxt = Self::new(self.ptr);
-                            let mut sub_block = sub_cxt.optimize_block(sub_block);
-                            // TODO: do we need to setup for read?
-                            self.setup_for_read(cond, &mut optimized);
+                            sub_cxt.emit_all(&sub_cxt.read_and_pending(), &mut sub_block);
+                            self.emit_all(&sub_cxt.read(), &mut optimized);
+                            let mut to_add = Block::new();
+                            if iters.at_most_once() {
+                                if iters.at_least_once() {
+                                    to_add.append(&mut sub_block);
+                                    // TODO: update outer cell_values with adds and loads.
+                                } else {
+                                    // TODO: emit pending known adds into to_add
+                                    to_add.append(&mut sub_block);
+                                    sub_cxt.emit(cond, &mut to_add);
+                                    // TODO: emit pending unknown adds into to_add
+                                    // TODO: emit pending loads into to_add
+                                    // TODO: update outer cell_values
+                                }
+                            } else {
+                                // TODO: extract loop invariant loads
+                                if iters.at_least_once() {
+                                    // TODO: update outer cell_values with adds
+                                } else {
+                                    // TODO: emit pending known adds as mul_add into to_add
+                                }
+                                if !sub_block.is_empty() || !iters.is_finite() {
+                                    sub_cxt.emit(cond, &mut sub_block);
+                                    self.emit(cond, &mut optimized);
+                                    to_add.push(Instr::Loop(cond, sub_block))
+                                }
+                                if iters.at_least_once() {
+                                    // TODO: update outer cell_values with loads
+                                } else {
+                                    // TODO: emit pending unknown adds into to_add
+                                    // TODO: emit pending loads into to_add
+                                }
+                                // TODO: update outer cell_values
+                            }
+                            if iters.at_least_once()
+                                || to_add.is_empty()
+                                || (to_add.len() == 1
+                                    && if let Instr::Loop(cond, _) = to_add[0] {
+                                        true
+                                    } else {
+                                        false
+                                    })
+                            {
+                                optimized.append(&mut to_add);
+                            } else {
+                                self.emit(cond, &mut optimized);
+                                optimized.push(Instr::Loop(cond, to_add));
+                            }
                         }
-                    } else {
-                        let mut sub_cxt = Self::new(self.ptr);
-                        let mut sub_block = sub_cxt.optimize_block(sub_block);
-                        // TODO: do we need to setup for read?
-                        self.setup_for_read(cond, &mut optimized);
                     }
-                    self.values.insert(cond, C::ZERO);
+                    self.load_cell(cond, C::ZERO);
                 }
             }
         }

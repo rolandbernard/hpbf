@@ -1,6 +1,6 @@
 use std::{env, fs::File, io::Read};
 
-use hpbf::{parse, CellType, Context, Error, ErrorKind};
+use hpbf::{parse, Block, CellType, Context, Error, ErrorKind};
 
 fn print_help_text() {
     println!(
@@ -37,12 +37,12 @@ fn print_error(code: &str, error: Error) {
 
 fn execute_code<C: CellType>(code_segments: Vec<String>) -> bool {
     let mut has_error = false;
-    let mut cxt = Context::<C>::with_stdio();
+    let mut program = Block::new();
     for code in code_segments {
         match parse(&code) {
-            Ok(program) => {
+            Ok(mut prog) => {
                 if !has_error {
-                    cxt.execute(&program)
+                    program.append(&mut prog);
                 }
             }
             Err(error) => {
@@ -50,6 +50,9 @@ fn execute_code<C: CellType>(code_segments: Vec<String>) -> bool {
                 has_error = true;
             }
         }
+    }
+    if !has_error {
+        Context::<C>::with_stdio().execute(&program);
     }
     return has_error;
 }

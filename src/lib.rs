@@ -43,6 +43,17 @@ pub trait CellType: Copy + PartialEq {
 
     /// Wrapping multiplication.
     fn wrapping_mul(self, rhs: Self) -> Self;
+
+    /// Return the value `x` such that `x.wrapping_add(self) == Self::ZERO`.
+    fn wrapping_negate(self) -> Self;
+
+    /// Compute the value `x` such that `x.wrapping_mul(other) == self`. It
+    /// should be noted that the semantics of this are very different from the
+    /// standard `wrapping_div` that Rust provides for integer types.
+    fn wrapping_div(self, other: Self) -> Option<Self>;
+
+    /// Return true if the value is odd.
+    fn is_odd(self) -> bool;
 }
 
 impl CellType for u8 {
@@ -66,6 +77,18 @@ impl CellType for u8 {
 
     fn wrapping_mul(self, rhs: Self) -> Self {
         self.wrapping_mul(rhs)
+    }
+
+    fn wrapping_negate(self) -> Self {
+        self.wrapping_neg()
+    }
+
+    fn wrapping_div(self, other: Self) -> Option<Self> {
+        todo!()
+    }
+
+    fn is_odd(self) -> bool {
+        self % 2 == 1
     }
 }
 
@@ -91,6 +114,18 @@ impl CellType for u16 {
     fn wrapping_mul(self, rhs: Self) -> Self {
         self.wrapping_mul(rhs)
     }
+
+    fn wrapping_negate(self) -> Self {
+        self.wrapping_neg()
+    }
+
+    fn wrapping_div(self, other: Self) -> Option<Self> {
+        todo!()
+    }
+
+    fn is_odd(self) -> bool {
+        self % 2 == 1
+    }
 }
 
 impl CellType for u32 {
@@ -115,6 +150,18 @@ impl CellType for u32 {
     fn wrapping_mul(self, rhs: Self) -> Self {
         self.wrapping_mul(rhs)
     }
+
+    fn wrapping_negate(self) -> Self {
+        self.wrapping_neg()
+    }
+
+    fn wrapping_div(self, other: Self) -> Option<Self> {
+        todo!()
+    }
+
+    fn is_odd(self) -> bool {
+        self % 2 == 1
+    }
 }
 
 impl CellType for u64 {
@@ -138,5 +185,17 @@ impl CellType for u64 {
 
     fn wrapping_mul(self, rhs: Self) -> Self {
         self.wrapping_mul(rhs)
+    }
+
+    fn wrapping_negate(self) -> Self {
+        self.wrapping_neg()
+    }
+
+    fn wrapping_div(self, other: Self) -> Option<Self> {
+        todo!()
+    }
+
+    fn is_odd(self) -> bool {
+        self % 2 == 1
     }
 }
