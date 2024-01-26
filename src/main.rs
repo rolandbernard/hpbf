@@ -1,6 +1,6 @@
 use std::{env, fs::File, io::Read};
 
-use hpbf::{parse, Block, CellType, Context, Error, ErrorKind};
+use hpbf::{optimize, parse, Block, CellType, Context, Error, ErrorKind};
 
 fn print_help_text() {
     println!(
@@ -9,6 +9,8 @@ fn print_help_text() {
     );
     println!("Options:");
     println!("   -f,--file file   Read the code from the given file");
+    println!("   -O0              Do not apply any optimization");
+    println!("   -O1, -O2, -O3    Apply different levels of optimization");
     println!("   -i8              Run the code using a cell size of 8 bit");
     println!("   -i16             Run the code using a cell size of 16 bit");
     println!("   -i32             Run the code using a cell size of 32 bit");
@@ -35,7 +37,7 @@ fn print_error(code: &str, error: Error) {
     }
 }
 
-fn execute_code<C: CellType>(code_segments: Vec<String>) -> bool {
+fn execute_code<C: CellType>(code_segments: Vec<String>, opt: u32) -> bool {
     let mut has_error = false;
     let mut program = Block::new();
     for code in code_segments {
@@ -52,7 +54,8 @@ fn execute_code<C: CellType>(code_segments: Vec<String>) -> bool {
         }
     }
     if !has_error {
-        Context::<C>::with_stdio().execute(&program);
+        let prog = if opt != 0 { optimize(program) } else { program };
+        Context::<C>::with_stdio().execute(&prog);
     }
     return has_error;
 }
@@ -60,6 +63,7 @@ fn execute_code<C: CellType>(code_segments: Vec<String>) -> bool {
 fn main() -> Result<(), ()> {
     let mut bits = 8;
     let mut print_help = false;
+    let mut opt = 3;
     let mut has_error = false;
     let mut next_is_file = false;
     let mut code_segments = Vec::new();
@@ -95,6 +99,10 @@ fn main() -> Result<(), ()> {
             }
         } else {
             match arg.as_str() {
+                "-O0" => opt = 0,
+                "-O1" => opt = 1,
+                "-O2" => opt = 2,
+                "-O3" => opt = 3,
                 "-i8" => bits = 8,
                 "-i16" => bits = 16,
                 "-i32" => bits = 32,
@@ -109,10 +117,10 @@ fn main() -> Result<(), ()> {
         print_help_text();
     } else {
         if match bits {
-            8 => execute_code::<u8>(code_segments),
-            16 => execute_code::<u16>(code_segments),
-            32 => execute_code::<u32>(code_segments),
-            64 => execute_code::<u64>(code_segments),
+            8 => execute_code::<u8>(code_segments, opt),
+            16 => execute_code::<u16>(code_segments, opt),
+            32 => execute_code::<u32>(code_segments, opt),
+            64 => execute_code::<u64>(code_segments, opt),
             _ => panic!("unsupported cell size"),
         } {
             has_error = true;
