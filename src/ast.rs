@@ -213,6 +213,18 @@ impl<C: CellType> OptimizerContext<C> {
         }
     }
 
+    /// Return wether there are some buffered changes.
+    fn is_pending(&mut self, src: isize) -> bool {
+        match self.cell_values.get_mut(&src) {
+            Some(OptimizerValue::KnownValue { pending, .. }) if *pending => true,
+            Some(
+                OptimizerValue::KnownAddition { pending, .. }
+                | OptimizerValue::UnknownAddition { pending },
+            ) if *pending != C::ZERO => true,
+            _ => false,
+        }
+    }
+
     /// Emit (if necessary) the buffered modifications to the cell indicated by
     /// `src` and write the instructions into `block`.
     fn emit(&mut self, src: isize, block: &mut Block<C>) {
@@ -273,11 +285,13 @@ impl<C: CellType> OptimizerContext<C> {
     /// Analyze the behavior of a loop with condition cell `cond` and for which
     /// `sub_cxt` has finished the optimization analysis.
     fn compute_loop_count(&self, cond: isize, sub_cxt: &Self) -> OptimizerLoopCount<C> {
-        if self.ptr != sub_cxt.ptr || sub_cxt.had_shift {
-            OptimizerLoopCount::Unknown
+        if self.assume_zero && !self.cell_values.contains_key(&cond) {
+            OptimizerLoopCount::NTimes(C::ZERO)
         } else if let Some(OptimizerValue::KnownValue { value, .. }) = self.cell_values.get(&cond) {
             if *value == C::ZERO {
                 OptimizerLoopCount::NTimes(C::ZERO)
+            } else if self.ptr != sub_cxt.ptr || sub_cxt.had_shift {
+                OptimizerLoopCount::Unknown
             } else {
                 match sub_cxt.cell_values.get(&cond) {
                     Some(OptimizerValue::KnownValue { value, .. }) => {
@@ -298,6 +312,8 @@ impl<C: CellType> OptimizerContext<C> {
                     None => OptimizerLoopCount::Infinite,
                 }
             }
+        } else if self.ptr != sub_cxt.ptr || sub_cxt.had_shift {
+            OptimizerLoopCount::Unknown
         } else {
             match sub_cxt.cell_values.get(&cond) {
                 Some(OptimizerValue::KnownValue { value, .. }) => {
@@ -389,6 +405,7 @@ impl<C: CellType> OptimizerContext<C> {
                 Some(OptimizerValue::KnownValue { value, .. }) => {
                     self.add_cell(dst, value.wrapping_mul(val))
                 }
+                None if self.assume_zero => { /* Addition of zero can be ignored. */ }
                 _ => {
                     block.push(Instr::MulAdd(val, src, dst));
                     self.cell_values.insert(dst, OptimizerValue::UnknownValue);
@@ -436,6 +453,7 @@ impl<C: CellType> OptimizerContext<C> {
                                     self.emit(var, block);
                                     to_add.push(Instr::Add(*value, var));
                                     self.cell_values.insert(var, OptimizerValue::UnknownValue);
+                                    self.written_cells.insert(var);
                                 }
                             } else if let OptimizerLoopCount::NTimes(n) = iters {
                                 if iters.at_least_once() {
@@ -444,6 +462,7 @@ impl<C: CellType> OptimizerContext<C> {
                                     self.emit(var, block);
                                     to_add.push(Instr::Add(value.wrapping_mul(n), var));
                                     self.cell_values.insert(var, OptimizerValue::UnknownValue);
+                                    self.written_cells.insert(var);
                                 }
                             } else if let OptimizerLoopCount::Simple = iters {
                                 if iters.at_least_once() {
@@ -452,6 +471,7 @@ impl<C: CellType> OptimizerContext<C> {
                                     self.emit(var, block);
                                     to_add.push(Instr::MulAdd(*value, cond, var));
                                     self.cell_values.insert(var, OptimizerValue::UnknownValue);
+                                    self.written_cells.insert(var);
                                 }
                             } else if let OptimizerLoopCount::SimpleNegated = iters {
                                 if iters.at_least_once() {
@@ -460,6 +480,7 @@ impl<C: CellType> OptimizerContext<C> {
                                     self.emit(var, block);
                                     to_add.push(Instr::MulAdd(value.wrapping_neg(), cond, var));
                                     self.cell_values.insert(var, OptimizerValue::UnknownValue);
+                                    self.written_cells.insert(var);
                                 }
                             } else {
                                 self.emit(var, block);
@@ -473,15 +494,20 @@ impl<C: CellType> OptimizerContext<C> {
                     sub_cxt.load_cell(cond, C::ZERO);
                 } else if iters.at_most_once() {
                     to_add.append(&mut sub_block);
-                    sub_cxt.load_cell(cond, C::ZERO);
                 } else {
                     sub_cxt.emit(cond, &mut sub_block);
                     self.emit(cond, block);
-                    to_add.push(Instr::Loop(cond, sub_block))
+                    to_add.push(Instr::Loop(cond, sub_block));
+                }
+                for var in &sub_cxt.read_cells {
+                    if !self.written_cells.contains(var) {
+                        self.read_cells.insert(*var);
+                    }
                 }
                 if iters.effects_seen_later() {
                     for var in &sub_cxt.written_cells {
                         self.cell_values.insert(*var, OptimizerValue::UnknownValue);
+                        self.written_cells.insert(*var);
                     }
                     for var in sub_cxt.pending() {
                         if var != cond {
@@ -489,6 +515,7 @@ impl<C: CellType> OptimizerContext<C> {
                                 Some(OptimizerValue::UnknownAddition { pending }) => {
                                     to_add.push(Instr::Add(*pending, var));
                                     self.cell_values.insert(var, OptimizerValue::UnknownValue);
+                                    self.written_cells.insert(var);
                                 }
                                 Some(OptimizerValue::KnownValue { value, .. }) => {
                                     if iters.at_least_once() {
@@ -496,6 +523,7 @@ impl<C: CellType> OptimizerContext<C> {
                                     } else {
                                         to_add.push(Instr::Load(*value, var));
                                         self.cell_values.insert(var, OptimizerValue::UnknownValue);
+                                        self.written_cells.insert(var);
                                     }
                                 }
                                 _ => {}
@@ -513,14 +541,26 @@ impl<C: CellType> OptimizerContext<C> {
                         })
                 {
                     block.append(&mut to_add);
+                    if sub_cxt.is_pending(cond) {
+                        self.load_cell(cond, C::ZERO);
+                    }
                 } else {
-                    sub_cxt.emit(cond, &mut to_add);
+                    if sub_cxt.is_pending(cond) {
+                        to_add.push(Instr::Load(C::ZERO, cond));
+                    }
                     self.emit(cond, block);
                     block.push(Instr::Loop(cond, to_add));
                 }
             }
         }
-        self.load_cell(cond, C::ZERO);
+        let is_cond_pending = self.is_pending(cond);
+        self.cell_values.insert(
+            cond,
+            OptimizerValue::KnownValue {
+                value: C::ZERO,
+                pending: is_cond_pending,
+            },
+        );
     }
 
     /// Optimize the given block. This will assume that the block is not used
@@ -699,9 +739,7 @@ mod tests {
             ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
             +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
         )?;
-        eprintln!("{:?}", prog);
         let prog = optimize(prog);
-        eprintln!("{:?}", prog);
         let mut buf = Vec::new();
         let mut ctx = Context::<u32>::new(None, Some(Box::new(&mut buf)));
         ctx.execute(&prog);
@@ -716,9 +754,7 @@ mod tests {
             ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
             +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
         )?;
-        eprintln!("{:?}", prog);
         let prog = optimize(prog);
-        eprintln!("{:?}", prog);
         let mut buf = Vec::new();
         let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
         ctx.execute(&prog);
@@ -730,16 +766,78 @@ mod tests {
     #[test]
     fn optimize_hello_world_minimal() -> Result<(), Error> {
         let prog = parse::<u8>(
-            "+[-->-[>>+>-----<<]<--<---]>-.>>>+.>>..+++[.>]<<<<.+++.------.<<-.>>>>+."
+            "+[-->-[>>+>-----<<]<--<---]>-.>>>+.>>..+++[.>]<<<<.+++.------.<<-.>>>>+.",
         )?;
-        eprintln!("{:?}", prog);
         let prog = optimize(prog);
-        eprintln!("{:?}", prog);
         let mut buf = Vec::new();
         let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
         ctx.execute(&prog);
         drop(ctx);
         assert_eq!(String::from_utf8(buf).unwrap(), "Hello, World!");
+        Ok(())
+    }
+
+    #[test]
+    fn optimize_program_access_distant_cell() -> Result<(), Error> {
+        let mut buf = Vec::new();
+        let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
+        let prog = parse(
+            "++++[>++++++<-]>[>+++++>+++++++<<-]>>++++<[[>[[
+            >>+<<-]<]>>>-]>-[>+>+<<-]>]+++++[>+++++++<<++>-]>.<<.",
+        )?;
+        let prog = optimize(prog);
+        ctx.execute(&prog);
+        drop(ctx);
+        assert_eq!(String::from_utf8(buf).unwrap(), "#\n");
+        Ok(())
+    }
+
+    #[test]
+    fn optimize_program_output_h() -> Result<(), Error> {
+        let mut buf = Vec::new();
+        let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
+        let prog = parse(
+            "[]++++++++++[>>+>+>++++++[<<+<+++>>>-]<<<<-]
+            \"A*$\";?@![#>>+<<]>[>>]<<<<[>++<[-]]>.>.",
+        )?;
+        let prog = optimize(prog);
+        ctx.execute(&prog);
+        drop(ctx);
+        assert_eq!(String::from_utf8(buf).unwrap(), "H\n");
+        Ok(())
+    }
+
+    #[test]
+    fn optimize_program_rot13() -> Result<(), Error> {
+        let mut buf = Vec::new();
+        let mut ctx = Context::<u8>::new(
+            Some(Box::new("~mlk zyx".as_bytes())),
+            Some(Box::new(&mut buf)),
+        );
+        let prog = parse(
+            ",
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>++++++++++++++<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>>+++++[<----->-]<<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>++++++++++++++<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-
+            [>++++++++++++++<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>>+++++[<----->-]<<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>++++++++++++++<-
+            [>+<-]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
+            ]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]>.[-]<,]",
+        )?;
+        let prog = optimize(prog);
+        ctx.execute(&prog);
+        drop(ctx);
+        assert_eq!(String::from_utf8(buf).unwrap(), "~zyx mlk");
         Ok(())
     }
 }
