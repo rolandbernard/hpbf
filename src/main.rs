@@ -35,17 +35,28 @@ fn print_error(code: &str, error: Error) {
         ErrorKind::FileEncodingError => {
             eprintln!("error: failed to read file `{code}`");
         }
+        ErrorKind::LlvmError => {
+            eprintln!("error: llvm error: {code}");
+        }
     }
 }
 
 #[cfg(not(feature = "llvm"))]
-fn execute_in_context<C: CellType>(cxt: &mut Context<C>, prog: Block<C>) {
+fn execute_in_context<C: CellType>(cxt: &mut Context<C>, _opt: u32, prog: Block<C>) {
     cxt.execute(&prog);
 }
 
 #[cfg(feature = "llvm")]
-fn execute_in_context<C: CellType>(cxt: &mut Context<C>, prog: Block<C>) {
-    cxt.jit_execute(&prog);
+fn execute_in_context<C: CellType>(cxt: &mut Context<C>, opt: u32, prog: Block<C>) {
+    if let Err(str) = cxt.jit_execute(opt, &prog) {
+        print_error(
+            &str,
+            Error {
+                kind: ErrorKind::LlvmError,
+                position: 0,
+            },
+        );
+    }
 }
 
 fn execute_code<C: CellType>(code_segments: Vec<String>, opt: u32, no_jit: bool) -> bool {
@@ -70,7 +81,7 @@ fn execute_code<C: CellType>(code_segments: Vec<String>, opt: u32, no_jit: bool)
         if no_jit {
             cxt.execute(&prog);
         } else {
-            execute_in_context(&mut cxt, prog);
+            execute_in_context(&mut cxt, opt, prog);
         }
     }
     return has_error;
@@ -79,7 +90,7 @@ fn execute_code<C: CellType>(code_segments: Vec<String>, opt: u32, no_jit: bool)
 fn main() -> Result<(), ()> {
     let mut bits = 8;
     let mut print_help = false;
-    let mut no_jit = false;
+    let mut no_jit = true;
     let mut opt = 3;
     let mut has_error = false;
     let mut next_is_file = false;

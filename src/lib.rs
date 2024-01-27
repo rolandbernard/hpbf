@@ -15,6 +15,7 @@ pub enum ErrorKind {
     LoopNotOpened,
     FileReadFailed,
     FileEncodingError,
+    LlvmError,
 }
 
 /// Error that might be encountered during the parsing of a Brainfuck program.

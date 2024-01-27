@@ -11,6 +11,8 @@ use crate::{Block, CellType, Instr};
 /// Context for the Brainfuck execution environment.
 #[repr(C)]
 pub struct Context<'a, C: CellType> {
+    // Do not change the order or position of the three first fields. They are
+    // used by the code generated in the jit compiler.
     mem_low: *mut C,
     mem_high: *mut C,
     mem_ptr: *mut C,
@@ -346,7 +348,7 @@ mod tests {
         let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
         ctx.execute(&parse(
             "++++[>++++++<-]>[>+++++>+++++++<<-]>>++++<[[>[[
-            >>+<<-]<]>>>-]>-[>+>+<<-]>]+++++[>+++++++<<++>-]>.<<."
+            >>+<<-]<]>>>-]>-[>+>+<<-]>]+++++[>+++++++<<++>-]>.<<.",
         )?);
         drop(ctx);
         assert_eq!(String::from_utf8(buf).unwrap(), "#\n");
@@ -359,7 +361,7 @@ mod tests {
         let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
         ctx.execute(&parse(
             "[]++++++++++[>>+>+>++++++[<<+<+++>>>-]<<<<-]
-            \"A*$\";?@![#>>+<<]>[>>]<<<<[>++<[-]]>.>."
+            \"A*$\";?@![#>>+<<]>[>>]<<<<[>++<[-]]>.>.",
         )?);
         drop(ctx);
         assert_eq!(String::from_utf8(buf).unwrap(), "H\n");
@@ -369,7 +371,10 @@ mod tests {
     #[test]
     fn test_program_rot13() -> Result<(), Error> {
         let mut buf = Vec::new();
-        let mut ctx = Context::<u8>::new(Some(Box::new("~mlk zyx".as_bytes())), Some(Box::new(&mut buf)));
+        let mut ctx = Context::<u8>::new(
+            Some(Box::new("~mlk zyx".as_bytes())),
+            Some(Box::new(&mut buf)),
+        );
         ctx.execute(&parse(
             ",
             [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
@@ -388,7 +393,7 @@ mod tests {
             [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
             [>++++++++++++++<-
             [>+<-]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
-            ]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]>.[-]<,]"
+            ]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]>.[-]<,]",
         )?);
         drop(ctx);
         assert_eq!(String::from_utf8(buf).unwrap(), "~zyx mlk");
