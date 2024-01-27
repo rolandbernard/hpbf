@@ -60,7 +60,7 @@ impl<'a, C: CellType> Context<'a, C> {
         }
     }
 
-    fn make_accessible(&mut self, min: isize, max: isize) {
+    pub fn make_accessible(&mut self, min: isize, max: isize) {
         let old_size =
             (self.mem_high as isize - self.mem_low as isize) / mem::size_of::<C>() as isize;
         let old_ptr =
@@ -172,6 +172,11 @@ impl<'a, C: CellType> Context<'a, C> {
                 }
                 Instr::Loop(cond, block) => {
                     while self.read(*cond) != C::ZERO {
+                        self.execute(block);
+                    }
+                }
+                Instr::If(cond, block) => {
+                    if self.read(*cond) != C::ZERO {
                         self.execute(block);
                     }
                 }
@@ -343,6 +348,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_program_access_distant_cell() -> Result<(), Error> {
         let mut buf = Vec::new();
         let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
@@ -369,6 +375,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_program_rot13() -> Result<(), Error> {
         let mut buf = Vec::new();
         let mut ctx = Context::<u8>::new(
