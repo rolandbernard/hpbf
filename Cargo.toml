@@ -3,5 +3,9 @@ name = "hpbf"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["llvm"]
+llvm = ["dep:inkwell"]
+
 [dependencies]
-inkwell = { version = "0.3.0", features = ["llvm17-0"] }
+inkwell = { version = "0.3.0", features = ["llvm17-0"], optional = true }

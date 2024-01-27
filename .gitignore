@@ -1,7 +1,12 @@
-.vim/
-.vscode/
+# Editor specific settings
+.vim
+.vscode
 
+# Temporary files
 tmp.*
-coverage/
 
-target/
+# Build and coverage results
+target
+result
+output
+coverage
