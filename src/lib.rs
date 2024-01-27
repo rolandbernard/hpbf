@@ -1,6 +1,8 @@
 mod ast;
-mod codegen;
 mod runtime;
+
+#[cfg(feature = "llvm")]
+mod codegen;
 
 pub use ast::{optimize, parse, Block, Instr};
 pub use runtime::Context;

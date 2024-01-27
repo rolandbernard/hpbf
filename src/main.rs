@@ -9,7 +9,8 @@ fn print_help_text() {
     );
     println!("Options:");
     println!("   -f,--file file   Read the code from the given file");
-    println!("   -O0              Do not apply any optimization");
+    println!("   --no-jit         Do not perform jit compilation");
+    println!("   -O0, --no-opt    Do not apply any optimization");
     println!("   -O1, -O2, -O3    Apply different levels of optimization");
     println!("   -i8              Run the code using a cell size of 8 bit");
     println!("   -i16             Run the code using a cell size of 16 bit");
@@ -37,7 +38,17 @@ fn print_error(code: &str, error: Error) {
     }
 }
 
-fn execute_code<C: CellType>(code_segments: Vec<String>, opt: u32) -> bool {
+#[cfg(not(feature = "llvm"))]
+fn execute_in_context<C: CellType>(cxt: &mut Context<C>, prog: Block<C>) {
+    cxt.execute(&prog);
+}
+
+#[cfg(feature = "llvm")]
+fn execute_in_context<C: CellType>(cxt: &mut Context<C>, prog: Block<C>) {
+    cxt.jit_execute(&prog);
+}
+
+fn execute_code<C: CellType>(code_segments: Vec<String>, opt: u32, no_jit: bool) -> bool {
     let mut has_error = false;
     let mut program = Block::new();
     for code in code_segments {
@@ -55,7 +66,12 @@ fn execute_code<C: CellType>(code_segments: Vec<String>, opt: u32) -> bool {
     }
     if !has_error {
         let prog = if opt != 0 { optimize(program) } else { program };
-        Context::<C>::with_stdio().execute(&prog);
+        let mut cxt = Context::<C>::with_stdio();
+        if no_jit {
+            cxt.execute(&prog);
+        } else {
+            execute_in_context(&mut cxt, prog);
+        }
     }
     return has_error;
 }
@@ -63,6 +79,7 @@ fn execute_code<C: CellType>(code_segments: Vec<String>, opt: u32) -> bool {
 fn main() -> Result<(), ()> {
     let mut bits = 8;
     let mut print_help = false;
+    let mut no_jit = false;
     let mut opt = 3;
     let mut has_error = false;
     let mut next_is_file = false;
@@ -99,7 +116,8 @@ fn main() -> Result<(), ()> {
             }
         } else {
             match arg.as_str() {
-                "-O0" => opt = 0,
+                "--no-jit" => no_jit = true,
+                "-O0" | "--no-opt" => opt = 0,
                 "-O1" => opt = 1,
                 "-O2" => opt = 2,
                 "-O3" => opt = 3,
@@ -117,10 +135,10 @@ fn main() -> Result<(), ()> {
         print_help_text();
     } else {
         if match bits {
-            8 => execute_code::<u8>(code_segments, opt),
-            16 => execute_code::<u16>(code_segments, opt),
-            32 => execute_code::<u32>(code_segments, opt),
-            64 => execute_code::<u64>(code_segments, opt),
+            8 => execute_code::<u8>(code_segments, opt, no_jit),
+            16 => execute_code::<u16>(code_segments, opt, no_jit),
+            32 => execute_code::<u32>(code_segments, opt, no_jit),
+            64 => execute_code::<u64>(code_segments, opt, no_jit),
             _ => panic!("unsupported cell size"),
         } {
             has_error = true;
