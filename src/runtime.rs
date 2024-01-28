@@ -1,9 +1,7 @@
 //! Contains the runtime for Brainfuck and a simple interpreter.
 
 use std::{
-    alloc::{alloc_zeroed, dealloc, Layout},
-    io::{stdin, stdout, Read, Write},
-    mem, ptr,
+    alloc::{alloc_zeroed, dealloc, Layout}, io::{stdin, stdout, Read, Write}, mem, process::exit, ptr
 };
 
 use crate::{Block, CellType, Instr};
@@ -128,7 +126,9 @@ impl<'a, C: CellType> Context<'a, C> {
     pub fn input(&mut self) -> u8 {
         let mut result = [0];
         if let Some(input) = &mut self.input {
-            input.read(&mut result).ok();
+            if input.read(&mut result).is_err() {
+                exit(1);
+            }
         }
         result[0]
     }
@@ -137,7 +137,11 @@ impl<'a, C: CellType> Context<'a, C> {
     #[cold]
     pub fn output(&mut self, value: u8) {
         if let Some(output) = &mut self.output {
-            output.write(&[value]).ok();
+            match output.write(&[value]) {
+                Ok(0) => exit(0),
+                Err(_) => exit(1),
+                _ => { /* Everything is ok. */ }
+            }
         }
     }
 }

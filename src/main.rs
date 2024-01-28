@@ -10,6 +10,7 @@ fn print_help_text() {
     println!("Options:");
     println!("   -f,--file file   Read the code from the given file");
     println!("   --no-jit         Do not perform jit compilation");
+    println!("   --print-ir       Print ir code to stderr and do not execute");
     println!("   -O0, --no-opt    Do not apply any optimization");
     println!("   -O1, -O2, -O3    Apply different levels of optimization");
     println!("   -i8              Run the code using a cell size of 8 bit");
@@ -42,13 +43,21 @@ fn print_error(code: &str, error: Error) {
 }
 
 #[cfg(not(feature = "llvm"))]
-fn execute_in_context<C: CellType>(cxt: &mut Context<C>, _opt: u32, prog: Block<C>) {
-    cxt.execute(&prog);
+fn execute_in_context<C: CellType>(cxt: &mut Context<C>, _opt: u32, prog: Block<C>, print_ir: bool) {
+    if print_ir {
+        eprintln!("{:?}", prog);
+    } else {
+        cxt.execute(&prog);
+    }
 }
 
 #[cfg(feature = "llvm")]
-fn execute_in_context<C: CellType>(cxt: &mut Context<C>, opt: u32, prog: Block<C>) {
-    if let Err(str) = cxt.jit_execute(opt, &prog) {
+fn execute_in_context<C: CellType>(cxt: &mut Context<C>, opt: u32, prog: Block<C>, print_ir: bool) {
+    if let Err(str) = if print_ir {
+        cxt.jit_print_module(opt, &prog)
+    } else {
+        cxt.jit_execute(opt, &prog)
+    } {
         print_error(
             &str,
             Error {
@@ -59,7 +68,7 @@ fn execute_in_context<C: CellType>(cxt: &mut Context<C>, opt: u32, prog: Block<C
     }
 }
 
-fn execute_code<C: CellType>(code_segments: Vec<String>, opt: u32, no_jit: bool) -> bool {
+fn execute_code<C: CellType>(code_segments: Vec<String>, opt: u32, no_jit: bool, print_ir: bool) -> bool {
     let mut has_error = false;
     let mut program = Block::new();
     for code in code_segments {
@@ -79,9 +88,13 @@ fn execute_code<C: CellType>(code_segments: Vec<String>, opt: u32, no_jit: bool)
         let prog = if opt != 0 { optimize(program) } else { program };
         let mut cxt = Context::<C>::with_stdio();
         if no_jit {
-            cxt.execute(&prog);
+            if print_ir {
+                eprintln!("{:?}", prog);
+            } else {
+                cxt.execute(&prog);
+            }
         } else {
-            execute_in_context(&mut cxt, opt, prog);
+            execute_in_context(&mut cxt, opt, prog, print_ir);
         }
     }
     return has_error;
@@ -91,6 +104,7 @@ fn main() -> Result<(), ()> {
     let mut bits = 8;
     let mut print_help = false;
     let mut no_jit = false;
+    let mut print_ir = false;
     let mut opt = 3;
     let mut has_error = false;
     let mut next_is_file = false;
@@ -128,6 +142,7 @@ fn main() -> Result<(), ()> {
         } else {
             match arg.as_str() {
                 "--no-jit" => no_jit = true,
+                "--print-ir" => print_ir = true,
                 "-O0" | "--no-opt" => opt = 0,
                 "-O1" => opt = 1,
                 "-O2" => opt = 2,
@@ -146,10 +161,10 @@ fn main() -> Result<(), ()> {
         print_help_text();
     } else {
         if match bits {
-            8 => execute_code::<u8>(code_segments, opt, no_jit),
-            16 => execute_code::<u16>(code_segments, opt, no_jit),
-            32 => execute_code::<u32>(code_segments, opt, no_jit),
-            64 => execute_code::<u64>(code_segments, opt, no_jit),
+            8 => execute_code::<u8>(code_segments, opt, no_jit, print_ir),
+            16 => execute_code::<u16>(code_segments, opt, no_jit, print_ir),
+            32 => execute_code::<u32>(code_segments, opt, no_jit, print_ir),
+            64 => execute_code::<u64>(code_segments, opt, no_jit, print_ir),
             _ => panic!("unsupported cell size"),
         } {
             has_error = true;

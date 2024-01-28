@@ -1,4 +1,5 @@
 use inkwell::{
+    attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
     builder::{Builder, BuilderError},
     execution_engine::JitFunction,
@@ -41,7 +42,13 @@ impl<'cxt> CodeGen<'cxt> {
         for instr in block {
             match instr {
                 Instr::Move(offset) => {
-                    let new_ptr = self.build_load_pointer::<C>(cxt_ptr, *offset)?;
+                    if let Some((start, end)) = &mut accessed {
+                        *start = isize::min(*start, *offset);
+                        *end = isize::max(*end, *offset + 1);
+                    } else {
+                        accessed = Some((*offset, *offset + 1));
+                    }
+                    let new_ptr = self.build_load_pointer::<C>(cxt_ptr, *offset, true)?;
                     self.build_store_pointer::<C>(cxt_ptr, new_ptr)?;
                     self.builder.position_at_end(prev_block);
                     if let Some((start, end)) = accessed {
@@ -71,7 +78,7 @@ impl<'cxt> CodeGen<'cxt> {
                         accessed = Some((*dst, *dst + 1));
                     }
                     let int_type = self.context.custom_width_int_type(C::BITS);
-                    let ptr = self.build_load_pointer::<C>(cxt_ptr, *dst)?;
+                    let ptr = self.build_load_pointer::<C>(cxt_ptr, *dst, true)?;
                     self.builder
                         .build_store(ptr, int_type.const_int(val.into_u64(), false))?;
                 }
@@ -83,7 +90,7 @@ impl<'cxt> CodeGen<'cxt> {
                         accessed = Some((*dst, *dst + 1));
                     }
                     let int_type = self.context.custom_width_int_type(C::BITS);
-                    let ptr = self.build_load_pointer::<C>(cxt_ptr, *dst)?;
+                    let ptr = self.build_load_pointer::<C>(cxt_ptr, *dst, true)?;
                     let old_value = self
                         .builder
                         .build_load(int_type, ptr, "add_original")?
@@ -103,8 +110,8 @@ impl<'cxt> CodeGen<'cxt> {
                         accessed = Some((isize::min(*dst, *src), isize::max(*dst, *src) + 1));
                     }
                     let int_type = self.context.custom_width_int_type(C::BITS);
-                    let src_ptr = self.build_load_pointer::<C>(cxt_ptr, *src)?;
-                    let dst_ptr = self.build_load_pointer::<C>(cxt_ptr, *dst)?;
+                    let src_ptr = self.build_load_pointer::<C>(cxt_ptr, *src, true)?;
+                    let dst_ptr = self.build_load_pointer::<C>(cxt_ptr, *dst, true)?;
                     let src_value = self
                         .builder
                         .build_load(int_type, src_ptr, "mul_original")?
@@ -131,7 +138,7 @@ impl<'cxt> CodeGen<'cxt> {
                         accessed = Some((*src, *src + 1));
                     }
                     let int_type = self.context.custom_width_int_type(C::BITS);
-                    let ptr = self.build_load_pointer::<C>(cxt_ptr, *src)?;
+                    let ptr = self.build_load_pointer::<C>(cxt_ptr, *src, true)?;
                     let src_value = self
                         .builder
                         .build_load(int_type, ptr, "output")?
@@ -154,7 +161,7 @@ impl<'cxt> CodeGen<'cxt> {
                         .build_call(self.runtime_input, &[cxt_ptr.into()], "input")?
                         .try_as_basic_value()
                         .unwrap_left();
-                    let ptr = self.build_load_pointer::<C>(cxt_ptr, *dst)?;
+                    let ptr = self.build_load_pointer::<C>(cxt_ptr, *dst, true)?;
                     self.builder.build_store(ptr, new_value)?;
                 }
                 Instr::Loop(cond, block) => {
@@ -168,7 +175,7 @@ impl<'cxt> CodeGen<'cxt> {
                     self.builder.build_unconditional_branch(cond_block)?;
                     self.builder.position_at_end(cond_block);
                     let int_type = self.context.custom_width_int_type(C::BITS);
-                    let cond_ptr = self.build_load_pointer::<C>(cxt_ptr, *cond)?;
+                    let cond_ptr = self.build_load_pointer::<C>(cxt_ptr, *cond, true)?;
                     let cond_value = self
                         .builder
                         .build_load(int_type, cond_ptr, "loop_cond")?
@@ -226,7 +233,7 @@ impl<'cxt> CodeGen<'cxt> {
                         accessed = Some((*cond, *cond + 1));
                     }
                     let int_type = self.context.custom_width_int_type(C::BITS);
-                    let cond_ptr = self.build_load_pointer::<C>(cxt_ptr, *cond)?;
+                    let cond_ptr = self.build_load_pointer::<C>(cxt_ptr, *cond, true)?;
                     let cond_value = self
                         .builder
                         .build_load(int_type, cond_ptr, "if_cond")?
@@ -323,6 +330,7 @@ impl<'cxt> CodeGen<'cxt> {
         &self,
         cxt_ptr: PointerValue<'cxt>,
         offset: isize,
+        in_bound: bool,
     ) -> Result<PointerValue<'cxt>, BuilderError> {
         let int_type = self.context.custom_width_int_type(C::BITS);
         let ptr_type = int_type.ptr_type(AddressSpace::default());
@@ -341,8 +349,13 @@ impl<'cxt> CodeGen<'cxt> {
             .ptr_sized_int_type(&self.target_data, None)
             .const_int(offset as u64, true);
         let mem_ptr_offset = unsafe {
-            self.builder
-                .build_gep(int_type, mem_ptr, &[offset], "mem_ptr_offset")?
+            if in_bound {
+                self.builder
+                    .build_in_bounds_gep(int_type, mem_ptr, &[offset], "mem_ptr_offset")?
+            } else {
+                self.builder
+                    .build_gep(int_type, mem_ptr, &[offset], "mem_ptr_offset")?
+            }
         };
         Ok(mem_ptr_offset)
     }
@@ -383,7 +396,7 @@ impl<'cxt> CodeGen<'cxt> {
     ) -> Result<(), BuilderError> {
         let intptr_type = self.context.ptr_sized_int_type(&self.target_data, None);
         let [mem_low, mem_high] = self.build_load_pointers::<C>(cxt_ptr)?;
-        let ptr_start = self.build_load_pointer::<C>(cxt_ptr, start)?;
+        let ptr_start = self.build_load_pointer::<C>(cxt_ptr, start, false)?;
         let diff_low = self.builder.build_int_sub(
             self.builder
                 .build_ptr_to_int(ptr_start, intptr_type, "ptr_start")?,
@@ -402,7 +415,7 @@ impl<'cxt> CodeGen<'cxt> {
         self.builder
             .build_conditional_branch(cmp_start, second_block, fail_block)?;
         self.builder.position_at_end(second_block);
-        let ptr_end = self.build_load_pointer::<C>(cxt_ptr, end)?;
+        let ptr_end = self.build_load_pointer::<C>(cxt_ptr, end, false)?;
         let diff_high = self.builder.build_int_sub(
             self.builder
                 .build_ptr_to_int(mem_high, intptr_type, "mem_high")?,
@@ -436,10 +449,42 @@ impl<'cxt> CodeGen<'cxt> {
         let int_type = self.context.custom_width_int_type(C::BITS);
         let void_type = self.context.void_type();
         let ptr_type = int_type.ptr_type(AddressSpace::default());
+        let cxt_struct_type = self
+            .context
+            .struct_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
         let function = self.module.add_function(
             "hpbf_program_entry",
             void_type.fn_type(&[ptr_type.into()], false),
             None,
+        );
+        let noalias_kind = Attribute::get_named_enum_kind_id("noalias");
+        function.add_attribute(
+            AttributeLoc::Param(0),
+            self.context.create_enum_attribute(noalias_kind, 0),
+        );
+        let nocapture_kind = Attribute::get_named_enum_kind_id("nocapture");
+        function.add_attribute(
+            AttributeLoc::Param(0),
+            self.context.create_enum_attribute(nocapture_kind, 0),
+        );
+        let noundef_kind = Attribute::get_named_enum_kind_id("noundef");
+        function.add_attribute(
+            AttributeLoc::Param(0),
+            self.context.create_enum_attribute(noundef_kind, 0),
+        );
+        let align_kind = Attribute::get_named_enum_kind_id("align");
+        function.add_attribute(
+            AttributeLoc::Param(0),
+            self.context.create_enum_attribute(
+                align_kind,
+                self.target_data.get_abi_alignment(&cxt_struct_type) as u64,
+            ),
+        );
+        let deref_kind = Attribute::get_named_enum_kind_id("dereferenceable");
+        function.add_attribute(
+            AttributeLoc::Param(0),
+            self.context
+                .create_enum_attribute(deref_kind, self.target_data.get_abi_size(&cxt_struct_type)),
         );
         let entry_block = self.context.append_basic_block(function, "entry");
         let body_block = self.context.append_basic_block(function, "body");
@@ -458,10 +503,12 @@ impl<'cxt> CodeGen<'cxt> {
         self.builder.build_return(None)?;
         Ok(())
     }
-}
 
-impl<'a, C: CellType> Context<'a, C> {
-    pub fn jit_execute<'b>(&'b mut self, opt: u32, program: &Block<C>) -> Result<(), String> {
+    fn create<C: CellType>(
+        context: &'cxt inkwell::context::Context,
+        opt: u32,
+        program: &Block<C>,
+    ) -> Result<Self, String> {
         let opt_level = match opt {
             0 => OptimizationLevel::None,
             1 => OptimizationLevel::Less,
@@ -482,7 +529,6 @@ impl<'a, C: CellType> Context<'a, C> {
             )
             .ok_or("failed to create target machine".to_owned())?;
         let target_data = target_machine.get_target_data();
-        let context = inkwell::context::Context::create();
         let module = context.create_module("hpbf");
         let builder = context.create_builder();
         module.set_triple(&triple);
@@ -491,6 +537,11 @@ impl<'a, C: CellType> Context<'a, C> {
         let intptr_type = context.ptr_sized_int_type(&target_data, None);
         let void_type = context.void_type();
         let ptr_type = int_type.ptr_type(AddressSpace::default());
+        let readnone_kind = Attribute::get_named_enum_kind_id("readnone");
+        let nocapture_kind = Attribute::get_named_enum_kind_id("nocapture");
+        let cold_kind = Attribute::get_named_enum_kind_id("cold");
+        let memory_kind = Attribute::get_named_enum_kind_id("memory");
+        let noalias_kind = Attribute::get_named_enum_kind_id("noalias");
         let runtime_extend = module.add_function(
             "hpbf_context_extend",
             void_type.fn_type(
@@ -499,18 +550,58 @@ impl<'a, C: CellType> Context<'a, C> {
             ),
             None,
         );
+        runtime_extend.add_attribute(
+            AttributeLoc::Param(0),
+            context.create_enum_attribute(nocapture_kind, 0),
+        );
+        runtime_extend.add_attribute(
+            AttributeLoc::Param(0),
+            context.create_enum_attribute(noalias_kind, 0),
+        );
+        runtime_extend.add_attribute(
+            AttributeLoc::Function,
+            context.create_enum_attribute(cold_kind, 0),
+        );
+        runtime_extend.add_attribute(
+            AttributeLoc::Function,
+            context.create_enum_attribute(memory_kind, 0xf),
+        );
         let runtime_input = module.add_function(
             "hpbf_context_input",
             int_type.fn_type(&[ptr_type.into()], false),
             None,
+        );
+        runtime_input.add_attribute(
+            AttributeLoc::Param(0),
+            context.create_enum_attribute(readnone_kind, 0),
+        );
+        runtime_input.add_attribute(
+            AttributeLoc::Param(0),
+            context.create_enum_attribute(nocapture_kind, 0),
+        );
+        runtime_input.add_attribute(
+            AttributeLoc::Function,
+            context.create_enum_attribute(memory_kind, 0xc),
         );
         let runtime_output = module.add_function(
             "hpbf_context_output",
             void_type.fn_type(&[ptr_type.into(), int_type.into()], false),
             None,
         );
+        runtime_output.add_attribute(
+            AttributeLoc::Param(0),
+            context.create_enum_attribute(readnone_kind, 0),
+        );
+        runtime_output.add_attribute(
+            AttributeLoc::Param(0),
+            context.create_enum_attribute(nocapture_kind, 0),
+        );
+        runtime_output.add_attribute(
+            AttributeLoc::Function,
+            context.create_enum_attribute(memory_kind, 0xc),
+        );
         let code_gen = CodeGen {
-            context: &context,
+            context,
             module,
             builder,
             target_data,
@@ -534,6 +625,27 @@ impl<'a, C: CellType> Context<'a, C> {
                 .map_err(|err| err.to_string())?;
             code_gen.module.verify().map_err(|err| err.to_string())?;
         }
+        Ok(code_gen)
+    }
+}
+
+impl<'a, C: CellType> Context<'a, C> {
+    pub fn jit_print_module<'b>(&'b mut self, opt: u32, program: &Block<C>) -> Result<(), String> {
+        let context = inkwell::context::Context::create();
+        let code_gen = CodeGen::create(&context, opt, program)?;
+        code_gen.module.print_to_stderr();
+        Ok(())
+    }
+
+    pub fn jit_execute<'b>(&'b mut self, opt: u32, program: &Block<C>) -> Result<(), String> {
+        let opt_level = match opt {
+            0 => OptimizationLevel::None,
+            1 => OptimizationLevel::Less,
+            2 => OptimizationLevel::Default,
+            _ => OptimizationLevel::Aggressive,
+        };
+        let context = inkwell::context::Context::create();
+        let code_gen = CodeGen::create(&context, opt, program)?;
         let execution_engine = code_gen
             .module
             .create_jit_execution_engine(opt_level)

@@ -4,6 +4,8 @@ mod runtime;
 #[cfg(feature = "llvm")]
 mod codegen;
 
+use std::fmt::Debug;
+
 pub use ast::{optimize, parse, Block, Instr};
 pub use runtime::Context;
 
@@ -27,7 +29,7 @@ pub struct Error {
 }
 
 /// Only types implementing this trait are allowed for the cells.
-pub trait CellType: Copy + PartialEq {
+pub trait CellType: Copy + PartialEq + Debug {
     /// Number of bits of this type. Needed for code generation.
     const BITS: u32;
 
