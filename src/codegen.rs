@@ -39,6 +39,7 @@ impl<'cxt> CodeGen<'cxt> {
         let ptr_type = int_type.ptr_type(AddressSpace::default());
         let mut moved = false;
         let mut accessed = None;
+        let mut first_accessed = None;
         let mut start_block = self.context.append_basic_block(function, "body");
         let mut current_block = start_block;
         self.builder.position_at_end(current_block);
@@ -59,28 +60,39 @@ impl<'cxt> CodeGen<'cxt> {
                         self.build_load_pointer::<C>(current_ptrs[2], *offset, false)?;
                     self.build_store_pointer::<C>(cxt_ptr, current_ptrs[2])?;
                     self.builder.position_at_end(prev_block);
-                    if let Some((start, end)) = accessed {
-                        let (new_ptrs, ok_block, fail_block) = self.build_bounds_checks::<C>(
-                            function,
-                            start_block,
-                            cxt_ptr,
-                            prev_ptrs,
-                            start,
-                            end,
-                        )?;
-                        start_ptrs[0]
-                            .add_incoming(&[(&prev_ptrs[0], ok_block), (&new_ptrs[0], fail_block)]);
-                        start_ptrs[1]
-                            .add_incoming(&[(&prev_ptrs[1], ok_block), (&new_ptrs[1], fail_block)]);
-                        start_ptrs[2]
-                            .add_incoming(&[(&prev_ptrs[2], ok_block), (&new_ptrs[2], fail_block)]);
-                        accessed = None;
+                    if accessed.is_some() && moved {
+                        if let Some((start, end)) = accessed {
+                            let (new_ptrs, ok_block, fail_block) = self.build_bounds_checks::<C>(
+                                function,
+                                start_block,
+                                cxt_ptr,
+                                prev_ptrs,
+                                start,
+                                end,
+                            )?;
+                            start_ptrs[0].add_incoming(&[
+                                (&prev_ptrs[0], ok_block),
+                                (&new_ptrs[0], fail_block),
+                            ]);
+                            start_ptrs[1].add_incoming(&[
+                                (&prev_ptrs[1], ok_block),
+                                (&new_ptrs[1], fail_block),
+                            ]);
+                            start_ptrs[2].add_incoming(&[
+                                (&prev_ptrs[2], ok_block),
+                                (&new_ptrs[2], fail_block),
+                            ]);
+                        }
                     } else {
                         self.builder.build_unconditional_branch(start_block)?;
                         start_ptrs[0].add_incoming(&[(&prev_ptrs[0], prev_block)]);
                         start_ptrs[1].add_incoming(&[(&prev_ptrs[1], prev_block)]);
                         start_ptrs[2].add_incoming(&[(&prev_ptrs[2], prev_block)]);
                     }
+                    if !moved {
+                        first_accessed = accessed;
+                    }
+                    accessed = None;
                     let next_block = self.context.append_basic_block(function, "body");
                     self.builder.position_at_end(next_block);
                     prev_ptrs = current_ptrs;
@@ -239,36 +251,50 @@ impl<'cxt> CodeGen<'cxt> {
                     ptrs_phi[1].add_incoming(&[(&sub_ptrs[1], new_block)]);
                     ptrs_phi[2].add_incoming(&[(&sub_ptrs[2], new_block)]);
                     current_block = next_block;
+                    if let Some((sub_start, sub_end)) = sub_accessed {
+                        if let Some((start, end)) = &mut accessed {
+                            *start = isize::min(*start, sub_start);
+                            *end = isize::max(*end, sub_end);
+                        } else {
+                            accessed = sub_accessed;
+                        }
+                    }
                     if sub_moved {
                         self.builder.position_at_end(prev_block);
-                        if let Some((start, end)) = accessed {
-                            let (new_ptrs, ok_block, fail_block) = self.build_bounds_checks::<C>(
-                                function,
-                                start_block,
-                                cxt_ptr,
-                                prev_ptrs,
-                                start,
-                                end,
-                            )?;
-                            start_ptrs[0].add_incoming(&[
-                                (&prev_ptrs[0], ok_block),
-                                (&new_ptrs[0], fail_block),
-                            ]);
-                            start_ptrs[1].add_incoming(&[
-                                (&prev_ptrs[1], ok_block),
-                                (&new_ptrs[1], fail_block),
-                            ]);
-                            start_ptrs[2].add_incoming(&[
-                                (&prev_ptrs[2], ok_block),
-                                (&new_ptrs[2], fail_block),
-                            ]);
-                            accessed = None;
+                        if accessed.is_some() && moved {
+                            if let Some((start, end)) = accessed {
+                                let (new_ptrs, ok_block, fail_block) = self
+                                    .build_bounds_checks::<C>(
+                                        function,
+                                        start_block,
+                                        cxt_ptr,
+                                        prev_ptrs,
+                                        start,
+                                        end,
+                                    )?;
+                                start_ptrs[0].add_incoming(&[
+                                    (&prev_ptrs[0], ok_block),
+                                    (&new_ptrs[0], fail_block),
+                                ]);
+                                start_ptrs[1].add_incoming(&[
+                                    (&prev_ptrs[1], ok_block),
+                                    (&new_ptrs[1], fail_block),
+                                ]);
+                                start_ptrs[2].add_incoming(&[
+                                    (&prev_ptrs[2], ok_block),
+                                    (&new_ptrs[2], fail_block),
+                                ]);
+                            }
                         } else {
                             self.builder.build_unconditional_branch(start_block)?;
                             start_ptrs[0].add_incoming(&[(&prev_ptrs[0], prev_block)]);
                             start_ptrs[1].add_incoming(&[(&prev_ptrs[1], prev_block)]);
                             start_ptrs[2].add_incoming(&[(&prev_ptrs[2], prev_block)]);
                         }
+                        if !moved {
+                            first_accessed = accessed;
+                        }
+                        accessed = None;
                         let next_block = self.context.append_basic_block(function, "body");
                         self.builder.position_at_end(next_block);
                         prev_ptrs = current_ptrs;
@@ -286,14 +312,6 @@ impl<'cxt> CodeGen<'cxt> {
                             start_ptrs[2].as_basic_value().into_pointer_value(),
                         ];
                         moved = true;
-                    }
-                    if let Some((sub_start, sub_end)) = sub_accessed {
-                        if let Some((start, end)) = &mut accessed {
-                            *start = isize::min(*start, sub_start);
-                            *end = isize::max(*end, sub_end);
-                        } else {
-                            accessed = sub_accessed;
-                        }
                     }
                     self.builder.position_at_end(current_block);
                 }
@@ -345,36 +363,50 @@ impl<'cxt> CodeGen<'cxt> {
                     current_ptrs[1] = ptrs_phi[1].as_basic_value().into_pointer_value();
                     current_ptrs[2] = ptrs_phi[2].as_basic_value().into_pointer_value();
                     current_block = next_block;
+                    if let Some((sub_start, sub_end)) = sub_accessed {
+                        if let Some((start, end)) = &mut accessed {
+                            *start = isize::min(*start, sub_start);
+                            *end = isize::max(*end, sub_end);
+                        } else {
+                            accessed = sub_accessed;
+                        }
+                    }
                     if sub_moved {
                         self.builder.position_at_end(prev_block);
-                        if let Some((start, end)) = accessed {
-                            let (new_ptrs, ok_block, fail_block) = self.build_bounds_checks::<C>(
-                                function,
-                                start_block,
-                                cxt_ptr,
-                                prev_ptrs,
-                                start,
-                                end,
-                            )?;
-                            start_ptrs[0].add_incoming(&[
-                                (&prev_ptrs[0], ok_block),
-                                (&new_ptrs[0], fail_block),
-                            ]);
-                            start_ptrs[1].add_incoming(&[
-                                (&prev_ptrs[1], ok_block),
-                                (&new_ptrs[1], fail_block),
-                            ]);
-                            start_ptrs[2].add_incoming(&[
-                                (&prev_ptrs[2], ok_block),
-                                (&new_ptrs[2], fail_block),
-                            ]);
-                            accessed = None;
+                        if accessed.is_some() && moved {
+                            if let Some((start, end)) = accessed {
+                                let (new_ptrs, ok_block, fail_block) = self
+                                    .build_bounds_checks::<C>(
+                                        function,
+                                        start_block,
+                                        cxt_ptr,
+                                        prev_ptrs,
+                                        start,
+                                        end,
+                                    )?;
+                                start_ptrs[0].add_incoming(&[
+                                    (&prev_ptrs[0], ok_block),
+                                    (&new_ptrs[0], fail_block),
+                                ]);
+                                start_ptrs[1].add_incoming(&[
+                                    (&prev_ptrs[1], ok_block),
+                                    (&new_ptrs[1], fail_block),
+                                ]);
+                                start_ptrs[2].add_incoming(&[
+                                    (&prev_ptrs[2], ok_block),
+                                    (&new_ptrs[2], fail_block),
+                                ]);
+                            }
                         } else {
                             self.builder.build_unconditional_branch(start_block)?;
                             start_ptrs[0].add_incoming(&[(&prev_ptrs[0], prev_block)]);
                             start_ptrs[1].add_incoming(&[(&prev_ptrs[1], prev_block)]);
                             start_ptrs[2].add_incoming(&[(&prev_ptrs[2], prev_block)]);
                         }
+                        if !moved {
+                            first_accessed = accessed;
+                        }
+                        accessed = None;
                         let next_block = self.context.append_basic_block(function, "body");
                         self.builder.position_at_end(next_block);
                         prev_ptrs = current_ptrs;
@@ -393,14 +425,6 @@ impl<'cxt> CodeGen<'cxt> {
                         ];
                         moved = true;
                     }
-                    if let Some((sub_start, sub_end)) = sub_accessed {
-                        if let Some((start, end)) = &mut accessed {
-                            *start = isize::min(*start, sub_start);
-                            *end = isize::max(*end, sub_end);
-                        } else {
-                            accessed = sub_accessed;
-                        }
-                    }
                     self.builder.position_at_end(current_block);
                 }
             }
@@ -412,6 +436,14 @@ impl<'cxt> CodeGen<'cxt> {
                     *end = isize::max(*end, cond + 1);
                 } else {
                     accessed = Some((cond, cond + 1));
+                }
+                if let Some((first_start, first_end)) = first_accessed {
+                    if let Some((start, end)) = &mut accessed {
+                        *start = isize::min(*start, first_start);
+                        *end = isize::max(*end, first_end);
+                    } else {
+                        accessed = first_accessed;
+                    }
                 }
             }
             self.builder.position_at_end(prev_block);
@@ -430,7 +462,6 @@ impl<'cxt> CodeGen<'cxt> {
                     .add_incoming(&[(&prev_ptrs[1], ok_block), (&new_ptrs[1], fail_block)]);
                 start_ptrs[2]
                     .add_incoming(&[(&prev_ptrs[2], ok_block), (&new_ptrs[2], fail_block)]);
-                accessed = None;
             } else {
                 self.builder.build_unconditional_branch(start_block)?;
                 start_ptrs[0].add_incoming(&[(&prev_ptrs[0], prev_block)]);
@@ -443,9 +474,10 @@ impl<'cxt> CodeGen<'cxt> {
             start_ptrs[0].add_incoming(&[(&prev_ptrs[0], prev_block)]);
             start_ptrs[1].add_incoming(&[(&prev_ptrs[1], prev_block)]);
             start_ptrs[2].add_incoming(&[(&prev_ptrs[2], prev_block)]);
+            first_accessed = accessed;
         }
         self.builder.position_at_end(current_block);
-        Ok((moved, accessed, current_ptrs))
+        Ok((moved, first_accessed, current_ptrs))
     }
 
     fn build_store_pointer<C: CellType>(
@@ -770,18 +802,37 @@ impl<'cxt> CodeGen<'cxt> {
         code_gen
             .compile_program(program)
             .map_err(|err| err.to_string())?;
-        code_gen.module.verify().map_err(|err| err.to_string())?;
-        if opt != 0 {
-            code_gen
-                .module
-                .run_passes(
-                    &format!("default<O{opt}>"),
-                    &code_gen.target_machine,
-                    PassBuilderOptions::create(),
-                )
-                .map_err(|err| err.to_string())?;
-            code_gen.module.verify().map_err(|err| err.to_string())?;
-        }
+        let passes = if opt == 0 {
+            "default<O0>".to_owned()
+        } else if opt == 1 {
+            let passes = [
+                "simplifycfg",
+                "break-crit-edges",
+                "loop-simplify",
+                "mem2reg",
+                "adce",
+                "loop-mssa(licm)",
+                "instcombine",
+                "reassociate",
+                "sccp",
+                "mem2reg",
+                "adce",
+                "aggressive-instcombine",
+                "simplifycfg",
+                "mem2reg",
+            ];
+            passes.join(",")
+        } else {
+            format!("default<O{}>", (opt - 1).max(3))
+        };
+        code_gen
+            .module
+            .run_passes(
+                &passes,
+                &code_gen.target_machine,
+                PassBuilderOptions::create(),
+            )
+            .map_err(|err| err.to_string())?;
         Ok(code_gen)
     }
 }

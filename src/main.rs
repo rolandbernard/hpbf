@@ -1,4 +1,4 @@
-use std::{env, fs::File, io::Read};
+use std::{env, fs::File, io::Read, process::exit};
 
 use hpbf::{optimize, parse, Block, CellType, Context, Error, ErrorKind};
 
@@ -11,8 +11,8 @@ fn print_help_text() {
     println!("   -f,--file file   Read the code from the given file");
     println!("   --no-jit         Do not perform jit compilation");
     println!("   --print-ir       Print ir code to stderr and do not execute");
-    println!("   -O0, --no-opt    Do not apply any optimization");
-    println!("   -O1, -O2, -O3    Apply different levels of optimization");
+    println!("   --no-opt         Do not apply any pre-llvm optimization");
+    println!("   -O{{0|1|2|3|4}}    Apply different levels of optimization");
     println!("   -i8              Run the code using a cell size of 8 bit");
     println!("   -i16             Run the code using a cell size of 16 bit");
     println!("   -i32             Run the code using a cell size of 32 bit");
@@ -43,16 +43,27 @@ fn print_error(code: &str, error: Error) {
 }
 
 #[cfg(not(feature = "llvm"))]
-fn execute_in_context<C: CellType>(cxt: &mut Context<C>, _opt: u32, prog: Block<C>, print_ir: bool) {
+fn execute_in_context<C: CellType>(
+    cxt: &mut Context<C>,
+    _opt: u32,
+    prog: Block<C>,
+    print_ir: bool,
+) -> bool {
     if print_ir {
         eprintln!("{:?}", prog);
     } else {
         cxt.execute(&prog);
     }
+    return false;
 }
 
 #[cfg(feature = "llvm")]
-fn execute_in_context<C: CellType>(cxt: &mut Context<C>, opt: u32, prog: Block<C>, print_ir: bool) {
+fn execute_in_context<C: CellType>(
+    cxt: &mut Context<C>,
+    opt: u32,
+    prog: Block<C>,
+    print_ir: bool,
+) -> bool {
     if let Err(str) = if print_ir {
         cxt.jit_print_module(opt, &prog)
     } else {
@@ -65,10 +76,18 @@ fn execute_in_context<C: CellType>(cxt: &mut Context<C>, opt: u32, prog: Block<C
                 position: 0,
             },
         );
+        return true;
     }
+    return false;
 }
 
-fn execute_code<C: CellType>(code_segments: Vec<String>, opt: u32, no_jit: bool, print_ir: bool) -> bool {
+fn execute_code<C: CellType>(
+    code_segments: Vec<String>,
+    no_opt: bool,
+    opt: u32,
+    no_jit: bool,
+    print_ir: bool,
+) -> bool {
     let mut has_error = false;
     let mut program = Block::new();
     for code in code_segments {
@@ -85,7 +104,7 @@ fn execute_code<C: CellType>(code_segments: Vec<String>, opt: u32, no_jit: bool,
         }
     }
     if !has_error {
-        let prog = if opt != 0 { optimize(program) } else { program };
+        let prog = if no_opt { program } else { optimize(program) };
         let mut cxt = Context::<C>::with_stdio();
         if no_jit {
             if print_ir {
@@ -94,18 +113,21 @@ fn execute_code<C: CellType>(code_segments: Vec<String>, opt: u32, no_jit: bool,
                 cxt.execute(&prog);
             }
         } else {
-            execute_in_context(&mut cxt, opt, prog, print_ir);
+            if execute_in_context(&mut cxt, opt, prog, print_ir) {
+                has_error = true;
+            }
         }
     }
     return has_error;
 }
 
-fn main() -> Result<(), ()> {
+fn main() {
     let mut bits = 8;
     let mut print_help = false;
     let mut no_jit = false;
     let mut print_ir = false;
-    let mut opt = 3;
+    let mut no_opt = false;
+    let mut opt = 1;
     let mut has_error = false;
     let mut next_is_file = false;
     let mut code_segments = Vec::new();
@@ -143,10 +165,12 @@ fn main() -> Result<(), ()> {
             match arg.as_str() {
                 "--no-jit" => no_jit = true,
                 "--print-ir" => print_ir = true,
-                "-O0" | "--no-opt" => opt = 0,
+                "--no-opt" => no_opt = true,
+                "-O0" => opt = 0,
                 "-O1" => opt = 1,
                 "-O2" => opt = 2,
                 "-O3" => opt = 3,
+                "-O4" => opt = 4,
                 "-i8" => bits = 8,
                 "-i16" => bits = 16,
                 "-i32" => bits = 32,
@@ -161,14 +185,18 @@ fn main() -> Result<(), ()> {
         print_help_text();
     } else {
         if match bits {
-            8 => execute_code::<u8>(code_segments, opt, no_jit, print_ir),
-            16 => execute_code::<u16>(code_segments, opt, no_jit, print_ir),
-            32 => execute_code::<u32>(code_segments, opt, no_jit, print_ir),
-            64 => execute_code::<u64>(code_segments, opt, no_jit, print_ir),
+            8 => execute_code::<u8>(code_segments, no_opt, opt, no_jit, print_ir),
+            16 => execute_code::<u16>(code_segments, no_opt, opt, no_jit, print_ir),
+            32 => execute_code::<u32>(code_segments, no_opt, opt, no_jit, print_ir),
+            64 => execute_code::<u64>(code_segments, no_opt, opt, no_jit, print_ir),
             _ => panic!("unsupported cell size"),
         } {
             has_error = true;
         }
     }
-    return if has_error { Err(()) } else { Ok(()) };
+    if has_error {
+        exit(1)
+    } else {
+        exit(0)
+    };
 }
