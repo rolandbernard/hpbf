@@ -41,6 +41,9 @@ pub trait CellType: Copy + PartialEq {
     /// Convert a cell value into an output byte.
     fn into_u8(self) -> u8;
 
+    /// Convert a cell value into an unsigned 64 bit value.
+    fn into_u64(self) -> u64;
+
     /// Wrapping addition.
     fn wrapping_add(self, rhs: Self) -> Self;
 
@@ -118,6 +121,10 @@ impl CellType for u8 {
         self
     }
 
+    fn into_u64(self) -> u64 {
+        self as u64
+    }
+
     fn wrapping_add(self, rhs: Self) -> Self {
         self.wrapping_add(rhs)
     }
@@ -164,6 +171,10 @@ impl CellType for u16 {
 
     fn into_u8(self) -> u8 {
         self as u8
+    }
+
+    fn into_u64(self) -> u64 {
+        self as u64
     }
 
     fn wrapping_add(self, rhs: Self) -> Self {
@@ -214,6 +225,10 @@ impl CellType for u32 {
         self as u8
     }
 
+    fn into_u64(self) -> u64 {
+        self as u64
+    }
+
     fn wrapping_add(self, rhs: Self) -> Self {
         self.wrapping_add(rhs)
     }
@@ -260,6 +275,10 @@ impl CellType for u64 {
 
     fn into_u8(self) -> u8 {
         self as u8
+    }
+
+    fn into_u64(self) -> u64 {
+        self
     }
 
     fn wrapping_add(self, rhs: Self) -> Self {

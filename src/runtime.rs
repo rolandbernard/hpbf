@@ -60,13 +60,13 @@ impl<'a, C: CellType> Context<'a, C> {
         }
     }
 
-    pub fn make_accessible(&mut self, min: isize, max: isize) {
+    pub fn make_accessible(&mut self, start: isize, end: isize) {
         let old_size =
             (self.mem_high as isize - self.mem_low as isize) / mem::size_of::<C>() as isize;
         let old_ptr =
             (self.mem_ptr as isize - self.mem_low as isize) / mem::size_of::<C>() as isize;
-        let min_ptr = old_ptr + min;
-        let max_ptr = old_ptr + max + 1;
+        let min_ptr = old_ptr + start;
+        let max_ptr = old_ptr + end;
         let needed_below = if min_ptr < 0 { min_ptr.abs() } else { 0 };
         let needed_above = if max_ptr > old_size {
             max_ptr - old_size
@@ -105,7 +105,7 @@ impl<'a, C: CellType> Context<'a, C> {
 
     #[cold]
     fn write_out_of_bounds(&mut self, offset: isize, value: C) {
-        self.make_accessible(offset, offset);
+        self.make_accessible(offset, offset + 1);
         let ptr = self.mem_ptr.wrapping_offset(offset);
         // SAFETY: `make_accessible` ensures that `ptr` can be written safely.
         unsafe { ptr.write(value) }

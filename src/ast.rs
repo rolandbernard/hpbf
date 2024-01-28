@@ -788,7 +788,6 @@ mod tests {
             <<<<<<<<<<<<<-]>>+>>>+++>>->+++>-->>>+>++<<<<<<<<<<<<<>[.>]",
         )?;
         let prog = optimize(prog);
-        eprintln!("{:?}", prog);
         let mut buf = Vec::new();
         let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
         ctx.execute(&prog);

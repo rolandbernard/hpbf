@@ -90,7 +90,7 @@ fn execute_code<C: CellType>(code_segments: Vec<String>, opt: u32, no_jit: bool)
 fn main() -> Result<(), ()> {
     let mut bits = 8;
     let mut print_help = false;
-    let mut no_jit = true;
+    let mut no_jit = false;
     let mut opt = 3;
     let mut has_error = false;
     let mut next_is_file = false;
