@@ -30,44 +30,73 @@ impl<'cxt> CodeGen<'cxt> {
         &self,
         block: &Block<C>,
         function: FunctionValue<'cxt>,
-        mut prev_block: BasicBlock<'cxt>,
         cxt_ptr: PointerValue<'cxt>,
+        mut prev_block: BasicBlock<'cxt>,
+        mut prev_ptrs: [PointerValue<'cxt>; 3],
         cond: Option<isize>,
-    ) -> Result<(bool, Option<(isize, isize)>), BuilderError> {
+    ) -> Result<(bool, Option<(isize, isize)>, [PointerValue<'cxt>; 3]), BuilderError> {
+        let int_type = self.context.custom_width_int_type(C::BITS);
+        let ptr_type = int_type.ptr_type(AddressSpace::default());
         let mut moved = false;
         let mut accessed = None;
-        let mut current_start = self.context.append_basic_block(function, "body");
-        let mut current_block = current_start;
+        let mut start_block = self.context.append_basic_block(function, "body");
+        let mut current_block = start_block;
         self.builder.position_at_end(current_block);
+        let mut start_ptrs = [
+            self.builder.build_phi(ptr_type, "mem_low")?,
+            self.builder.build_phi(ptr_type, "mem_high")?,
+            self.builder.build_phi(ptr_type, "mem_ptr")?,
+        ];
+        let mut current_ptrs = [
+            start_ptrs[0].as_basic_value().into_pointer_value(),
+            start_ptrs[1].as_basic_value().into_pointer_value(),
+            start_ptrs[2].as_basic_value().into_pointer_value(),
+        ];
         for instr in block {
             match instr {
                 Instr::Move(offset) => {
-                    if let Some((start, end)) = &mut accessed {
-                        *start = isize::min(*start, *offset);
-                        *end = isize::max(*end, *offset + 1);
-                    } else {
-                        accessed = Some((*offset, *offset + 1));
-                    }
-                    let new_ptr = self.build_load_pointer::<C>(cxt_ptr, *offset, true)?;
-                    self.build_store_pointer::<C>(cxt_ptr, new_ptr)?;
+                    current_ptrs[2] =
+                        self.build_load_pointer::<C>(current_ptrs[2], *offset, false)?;
+                    self.build_store_pointer::<C>(cxt_ptr, current_ptrs[2])?;
                     self.builder.position_at_end(prev_block);
                     if let Some((start, end)) = accessed {
-                        self.build_bounds_checks::<C>(
+                        let (new_ptrs, ok_block, fail_block) = self.build_bounds_checks::<C>(
                             function,
-                            current_start,
+                            start_block,
                             cxt_ptr,
+                            prev_ptrs,
                             start,
                             end,
                         )?;
+                        start_ptrs[0]
+                            .add_incoming(&[(&prev_ptrs[0], ok_block), (&new_ptrs[0], fail_block)]);
+                        start_ptrs[1]
+                            .add_incoming(&[(&prev_ptrs[1], ok_block), (&new_ptrs[1], fail_block)]);
+                        start_ptrs[2]
+                            .add_incoming(&[(&prev_ptrs[2], ok_block), (&new_ptrs[2], fail_block)]);
                         accessed = None;
                     } else {
-                        self.builder.build_unconditional_branch(current_start)?;
+                        self.builder.build_unconditional_branch(start_block)?;
+                        start_ptrs[0].add_incoming(&[(&prev_ptrs[0], prev_block)]);
+                        start_ptrs[1].add_incoming(&[(&prev_ptrs[1], prev_block)]);
+                        start_ptrs[2].add_incoming(&[(&prev_ptrs[2], prev_block)]);
                     }
                     let next_block = self.context.append_basic_block(function, "body");
                     self.builder.position_at_end(next_block);
+                    prev_ptrs = current_ptrs;
                     prev_block = current_block;
-                    current_start = next_block;
+                    start_block = next_block;
                     current_block = next_block;
+                    start_ptrs = [
+                        self.builder.build_phi(ptr_type, "mem_low")?,
+                        self.builder.build_phi(ptr_type, "mem_high")?,
+                        self.builder.build_phi(ptr_type, "mem_ptr")?,
+                    ];
+                    current_ptrs = [
+                        start_ptrs[0].as_basic_value().into_pointer_value(),
+                        start_ptrs[1].as_basic_value().into_pointer_value(),
+                        start_ptrs[2].as_basic_value().into_pointer_value(),
+                    ];
                     moved = true;
                 }
                 Instr::Load(val, dst) => {
@@ -77,8 +106,7 @@ impl<'cxt> CodeGen<'cxt> {
                     } else {
                         accessed = Some((*dst, *dst + 1));
                     }
-                    let int_type = self.context.custom_width_int_type(C::BITS);
-                    let ptr = self.build_load_pointer::<C>(cxt_ptr, *dst, true)?;
+                    let ptr = self.build_load_pointer::<C>(current_ptrs[2], *dst, true)?;
                     self.builder
                         .build_store(ptr, int_type.const_int(val.into_u64(), false))?;
                 }
@@ -89,8 +117,7 @@ impl<'cxt> CodeGen<'cxt> {
                     } else {
                         accessed = Some((*dst, *dst + 1));
                     }
-                    let int_type = self.context.custom_width_int_type(C::BITS);
-                    let ptr = self.build_load_pointer::<C>(cxt_ptr, *dst, true)?;
+                    let ptr = self.build_load_pointer::<C>(current_ptrs[2], *dst, true)?;
                     let old_value = self
                         .builder
                         .build_load(int_type, ptr, "add_original")?
@@ -109,9 +136,8 @@ impl<'cxt> CodeGen<'cxt> {
                     } else {
                         accessed = Some((isize::min(*dst, *src), isize::max(*dst, *src) + 1));
                     }
-                    let int_type = self.context.custom_width_int_type(C::BITS);
-                    let src_ptr = self.build_load_pointer::<C>(cxt_ptr, *src, true)?;
-                    let dst_ptr = self.build_load_pointer::<C>(cxt_ptr, *dst, true)?;
+                    let src_ptr = self.build_load_pointer::<C>(current_ptrs[2], *src, true)?;
+                    let dst_ptr = self.build_load_pointer::<C>(current_ptrs[2], *dst, true)?;
                     let src_value = self
                         .builder
                         .build_load(int_type, src_ptr, "mul_original")?
@@ -137,8 +163,7 @@ impl<'cxt> CodeGen<'cxt> {
                     } else {
                         accessed = Some((*src, *src + 1));
                     }
-                    let int_type = self.context.custom_width_int_type(C::BITS);
-                    let ptr = self.build_load_pointer::<C>(cxt_ptr, *src, true)?;
+                    let ptr = self.build_load_pointer::<C>(current_ptrs[2], *src, true)?;
                     let src_value = self
                         .builder
                         .build_load(int_type, ptr, "output")?
@@ -161,7 +186,7 @@ impl<'cxt> CodeGen<'cxt> {
                         .build_call(self.runtime_input, &[cxt_ptr.into()], "input")?
                         .try_as_basic_value()
                         .unwrap_left();
-                    let ptr = self.build_load_pointer::<C>(cxt_ptr, *dst, true)?;
+                    let ptr = self.build_load_pointer::<C>(current_ptrs[2], *dst, true)?;
                     self.builder.build_store(ptr, new_value)?;
                 }
                 Instr::Loop(cond, block) => {
@@ -174,8 +199,18 @@ impl<'cxt> CodeGen<'cxt> {
                     let cond_block = self.context.append_basic_block(function, "loop_cond");
                     self.builder.build_unconditional_branch(cond_block)?;
                     self.builder.position_at_end(cond_block);
-                    let int_type = self.context.custom_width_int_type(C::BITS);
-                    let cond_ptr = self.build_load_pointer::<C>(cxt_ptr, *cond, true)?;
+                    let ptrs_phi = [
+                        self.builder.build_phi(ptr_type, "mem_low")?,
+                        self.builder.build_phi(ptr_type, "mem_high")?,
+                        self.builder.build_phi(ptr_type, "mem_ptr")?,
+                    ];
+                    ptrs_phi[0].add_incoming(&[(&current_ptrs[0], current_block)]);
+                    ptrs_phi[1].add_incoming(&[(&current_ptrs[1], current_block)]);
+                    ptrs_phi[2].add_incoming(&[(&current_ptrs[2], current_block)]);
+                    current_ptrs[0] = ptrs_phi[0].as_basic_value().into_pointer_value();
+                    current_ptrs[1] = ptrs_phi[1].as_basic_value().into_pointer_value();
+                    current_ptrs[2] = ptrs_phi[2].as_basic_value().into_pointer_value();
+                    let cond_ptr = self.build_load_pointer::<C>(current_ptrs[2], *cond, true)?;
                     let cond_value = self
                         .builder
                         .build_load(int_type, cond_ptr, "loop_cond")?
@@ -190,29 +225,66 @@ impl<'cxt> CodeGen<'cxt> {
                     let next_block = self.context.append_basic_block(function, "body");
                     self.builder
                         .build_conditional_branch(cmp_value, loop_block, next_block)?;
-                    let (sub_moved, sub_accessed) =
-                        self.compile_block(block, function, loop_block, cxt_ptr, Some(*cond))?;
+                    let (sub_moved, sub_accessed, sub_ptrs) = self.compile_block(
+                        block,
+                        function,
+                        cxt_ptr,
+                        loop_block,
+                        current_ptrs,
+                        Some(*cond),
+                    )?;
                     self.builder.build_unconditional_branch(cond_block)?;
+                    let new_block = self.builder.get_insert_block().unwrap();
+                    ptrs_phi[0].add_incoming(&[(&sub_ptrs[0], new_block)]);
+                    ptrs_phi[1].add_incoming(&[(&sub_ptrs[1], new_block)]);
+                    ptrs_phi[2].add_incoming(&[(&sub_ptrs[2], new_block)]);
                     current_block = next_block;
                     if sub_moved {
                         self.builder.position_at_end(prev_block);
                         if let Some((start, end)) = accessed {
-                            self.build_bounds_checks::<C>(
+                            let (new_ptrs, ok_block, fail_block) = self.build_bounds_checks::<C>(
                                 function,
-                                current_start,
+                                start_block,
                                 cxt_ptr,
+                                prev_ptrs,
                                 start,
                                 end,
                             )?;
+                            start_ptrs[0].add_incoming(&[
+                                (&prev_ptrs[0], ok_block),
+                                (&new_ptrs[0], fail_block),
+                            ]);
+                            start_ptrs[1].add_incoming(&[
+                                (&prev_ptrs[1], ok_block),
+                                (&new_ptrs[1], fail_block),
+                            ]);
+                            start_ptrs[2].add_incoming(&[
+                                (&prev_ptrs[2], ok_block),
+                                (&new_ptrs[2], fail_block),
+                            ]);
                             accessed = None;
                         } else {
-                            self.builder.build_unconditional_branch(current_start)?;
+                            self.builder.build_unconditional_branch(start_block)?;
+                            start_ptrs[0].add_incoming(&[(&prev_ptrs[0], prev_block)]);
+                            start_ptrs[1].add_incoming(&[(&prev_ptrs[1], prev_block)]);
+                            start_ptrs[2].add_incoming(&[(&prev_ptrs[2], prev_block)]);
                         }
                         let next_block = self.context.append_basic_block(function, "body");
                         self.builder.position_at_end(next_block);
+                        prev_ptrs = current_ptrs;
                         prev_block = current_block;
-                        current_start = next_block;
+                        start_block = next_block;
                         current_block = next_block;
+                        start_ptrs = [
+                            self.builder.build_phi(ptr_type, "mem_low")?,
+                            self.builder.build_phi(ptr_type, "mem_high")?,
+                            self.builder.build_phi(ptr_type, "mem_ptr")?,
+                        ];
+                        current_ptrs = [
+                            start_ptrs[0].as_basic_value().into_pointer_value(),
+                            start_ptrs[1].as_basic_value().into_pointer_value(),
+                            start_ptrs[2].as_basic_value().into_pointer_value(),
+                        ];
                         moved = true;
                     }
                     if let Some((sub_start, sub_end)) = sub_accessed {
@@ -232,8 +304,7 @@ impl<'cxt> CodeGen<'cxt> {
                     } else {
                         accessed = Some((*cond, *cond + 1));
                     }
-                    let int_type = self.context.custom_width_int_type(C::BITS);
-                    let cond_ptr = self.build_load_pointer::<C>(cxt_ptr, *cond, true)?;
+                    let cond_ptr = self.build_load_pointer::<C>(current_ptrs[2], *cond, true)?;
                     let cond_value = self
                         .builder
                         .build_load(int_type, cond_ptr, "if_cond")?
@@ -248,29 +319,78 @@ impl<'cxt> CodeGen<'cxt> {
                     let next_block = self.context.append_basic_block(function, "body");
                     self.builder
                         .build_conditional_branch(cmp_value, if_block, next_block)?;
-                    let (sub_moved, sub_accessed) =
-                        self.compile_block(block, function, if_block, cxt_ptr, None)?;
+                    let (sub_moved, sub_accessed, sub_ptrs) =
+                        self.compile_block(block, function, cxt_ptr, if_block, current_ptrs, None)?;
+                    let new_block = self.builder.get_insert_block().unwrap();
                     self.builder.build_unconditional_branch(next_block)?;
+                    self.builder.position_at_end(next_block);
+                    let ptrs_phi = [
+                        self.builder.build_phi(ptr_type, "mem_low")?,
+                        self.builder.build_phi(ptr_type, "mem_high")?,
+                        self.builder.build_phi(ptr_type, "mem_ptr")?,
+                    ];
+                    ptrs_phi[0].add_incoming(&[
+                        (&current_ptrs[0], current_block),
+                        (&sub_ptrs[0], new_block),
+                    ]);
+                    ptrs_phi[1].add_incoming(&[
+                        (&current_ptrs[1], current_block),
+                        (&sub_ptrs[1], new_block),
+                    ]);
+                    ptrs_phi[2].add_incoming(&[
+                        (&current_ptrs[2], current_block),
+                        (&sub_ptrs[2], new_block),
+                    ]);
+                    current_ptrs[0] = ptrs_phi[0].as_basic_value().into_pointer_value();
+                    current_ptrs[1] = ptrs_phi[1].as_basic_value().into_pointer_value();
+                    current_ptrs[2] = ptrs_phi[2].as_basic_value().into_pointer_value();
                     current_block = next_block;
                     if sub_moved {
                         self.builder.position_at_end(prev_block);
                         if let Some((start, end)) = accessed {
-                            self.build_bounds_checks::<C>(
+                            let (new_ptrs, ok_block, fail_block) = self.build_bounds_checks::<C>(
                                 function,
-                                current_start,
+                                start_block,
                                 cxt_ptr,
+                                prev_ptrs,
                                 start,
                                 end,
                             )?;
+                            start_ptrs[0].add_incoming(&[
+                                (&prev_ptrs[0], ok_block),
+                                (&new_ptrs[0], fail_block),
+                            ]);
+                            start_ptrs[1].add_incoming(&[
+                                (&prev_ptrs[1], ok_block),
+                                (&new_ptrs[1], fail_block),
+                            ]);
+                            start_ptrs[2].add_incoming(&[
+                                (&prev_ptrs[2], ok_block),
+                                (&new_ptrs[2], fail_block),
+                            ]);
                             accessed = None;
                         } else {
-                            self.builder.build_unconditional_branch(current_start)?;
+                            self.builder.build_unconditional_branch(start_block)?;
+                            start_ptrs[0].add_incoming(&[(&prev_ptrs[0], prev_block)]);
+                            start_ptrs[1].add_incoming(&[(&prev_ptrs[1], prev_block)]);
+                            start_ptrs[2].add_incoming(&[(&prev_ptrs[2], prev_block)]);
                         }
                         let next_block = self.context.append_basic_block(function, "body");
                         self.builder.position_at_end(next_block);
+                        prev_ptrs = current_ptrs;
                         prev_block = current_block;
-                        current_start = next_block;
+                        start_block = next_block;
                         current_block = next_block;
+                        start_ptrs = [
+                            self.builder.build_phi(ptr_type, "mem_low")?,
+                            self.builder.build_phi(ptr_type, "mem_high")?,
+                            self.builder.build_phi(ptr_type, "mem_ptr")?,
+                        ];
+                        current_ptrs = [
+                            start_ptrs[0].as_basic_value().into_pointer_value(),
+                            start_ptrs[1].as_basic_value().into_pointer_value(),
+                            start_ptrs[2].as_basic_value().into_pointer_value(),
+                        ];
                         moved = true;
                     }
                     if let Some((sub_start, sub_end)) = sub_accessed {
@@ -296,17 +416,36 @@ impl<'cxt> CodeGen<'cxt> {
             }
             self.builder.position_at_end(prev_block);
             if let Some((start, end)) = accessed {
-                self.build_bounds_checks::<C>(function, current_start, cxt_ptr, start, end)?;
+                let (new_ptrs, ok_block, fail_block) = self.build_bounds_checks::<C>(
+                    function,
+                    start_block,
+                    cxt_ptr,
+                    prev_ptrs,
+                    start,
+                    end,
+                )?;
+                start_ptrs[0]
+                    .add_incoming(&[(&prev_ptrs[0], ok_block), (&new_ptrs[0], fail_block)]);
+                start_ptrs[1]
+                    .add_incoming(&[(&prev_ptrs[1], ok_block), (&new_ptrs[1], fail_block)]);
+                start_ptrs[2]
+                    .add_incoming(&[(&prev_ptrs[2], ok_block), (&new_ptrs[2], fail_block)]);
                 accessed = None;
             } else {
-                self.builder.build_unconditional_branch(current_start)?;
+                self.builder.build_unconditional_branch(start_block)?;
+                start_ptrs[0].add_incoming(&[(&prev_ptrs[0], prev_block)]);
+                start_ptrs[1].add_incoming(&[(&prev_ptrs[1], prev_block)]);
+                start_ptrs[2].add_incoming(&[(&prev_ptrs[2], prev_block)]);
             }
         } else {
             self.builder.position_at_end(prev_block);
-            self.builder.build_unconditional_branch(current_start)?;
+            self.builder.build_unconditional_branch(start_block)?;
+            start_ptrs[0].add_incoming(&[(&prev_ptrs[0], prev_block)]);
+            start_ptrs[1].add_incoming(&[(&prev_ptrs[1], prev_block)]);
+            start_ptrs[2].add_incoming(&[(&prev_ptrs[2], prev_block)]);
         }
         self.builder.position_at_end(current_block);
-        Ok((moved, accessed))
+        Ok((moved, accessed, current_ptrs))
     }
 
     fn build_store_pointer<C: CellType>(
@@ -328,22 +467,11 @@ impl<'cxt> CodeGen<'cxt> {
 
     fn build_load_pointer<C: CellType>(
         &self,
-        cxt_ptr: PointerValue<'cxt>,
+        base: PointerValue<'cxt>,
         offset: isize,
         in_bound: bool,
     ) -> Result<PointerValue<'cxt>, BuilderError> {
         let int_type = self.context.custom_width_int_type(C::BITS);
-        let ptr_type = int_type.ptr_type(AddressSpace::default());
-        let cxt_struct_type = self
-            .context
-            .struct_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
-        let mem_ptr_ptr =
-            self.builder
-                .build_struct_gep(cxt_struct_type, cxt_ptr, 2, "mem_ptr_ptr")?;
-        let mem_ptr = self
-            .builder
-            .build_load(ptr_type, mem_ptr_ptr, "mem_ptr")?
-            .into_pointer_value();
         let offset = self
             .context
             .ptr_sized_int_type(&self.target_data, None)
@@ -351,10 +479,10 @@ impl<'cxt> CodeGen<'cxt> {
         let mem_ptr_offset = unsafe {
             if in_bound {
                 self.builder
-                    .build_in_bounds_gep(int_type, mem_ptr, &[offset], "mem_ptr_offset")?
+                    .build_in_bounds_gep(int_type, base, &[offset], "ptr_offset")?
             } else {
                 self.builder
-                    .build_gep(int_type, mem_ptr, &[offset], "mem_ptr_offset")?
+                    .build_gep(int_type, base, &[offset], "ptr_offset")?
             }
         };
         Ok(mem_ptr_offset)
@@ -363,7 +491,7 @@ impl<'cxt> CodeGen<'cxt> {
     fn build_load_pointers<C: CellType>(
         &self,
         cxt_ptr: PointerValue<'cxt>,
-    ) -> Result<[PointerValue<'cxt>; 2], BuilderError> {
+    ) -> Result<[PointerValue<'cxt>; 3], BuilderError> {
         let int_type = self.context.custom_width_int_type(C::BITS);
         let ptr_type = int_type.ptr_type(AddressSpace::default());
         let cxt_struct_type = self
@@ -383,7 +511,14 @@ impl<'cxt> CodeGen<'cxt> {
             .builder
             .build_load(ptr_type, mem_ptr_high, "mem_high")?
             .into_pointer_value();
-        Ok([mem_low, mem_high])
+        let mem_ptr_ptr =
+            self.builder
+                .build_struct_gep(cxt_struct_type, cxt_ptr, 2, "mem_ptr_ptr")?;
+        let mem_ptr = self
+            .builder
+            .build_load(ptr_type, mem_ptr_ptr, "mem_ptr")?
+            .into_pointer_value();
+        Ok([mem_low, mem_high, mem_ptr])
     }
 
     fn build_bounds_checks<C: CellType>(
@@ -391,12 +526,13 @@ impl<'cxt> CodeGen<'cxt> {
         function: FunctionValue<'cxt>,
         next_block: BasicBlock<'cxt>,
         cxt_ptr: PointerValue<'cxt>,
+        ptrs: [PointerValue<'cxt>; 3],
         start: isize,
         end: isize,
-    ) -> Result<(), BuilderError> {
+    ) -> Result<([PointerValue<'cxt>; 3], BasicBlock<'cxt>, BasicBlock<'cxt>), BuilderError> {
         let intptr_type = self.context.ptr_sized_int_type(&self.target_data, None);
-        let [mem_low, mem_high] = self.build_load_pointers::<C>(cxt_ptr)?;
-        let ptr_start = self.build_load_pointer::<C>(cxt_ptr, start, false)?;
+        let [mem_low, mem_high, mem_ptr] = ptrs;
+        let ptr_start = self.build_load_pointer::<C>(mem_ptr, start, false)?;
         let diff_low = self.builder.build_int_sub(
             self.builder
                 .build_ptr_to_int(ptr_start, intptr_type, "ptr_start")?,
@@ -415,7 +551,7 @@ impl<'cxt> CodeGen<'cxt> {
         self.builder
             .build_conditional_branch(cmp_start, second_block, fail_block)?;
         self.builder.position_at_end(second_block);
-        let ptr_end = self.build_load_pointer::<C>(cxt_ptr, end, false)?;
+        let ptr_end = self.build_load_pointer::<C>(mem_ptr, end, false)?;
         let diff_high = self.builder.build_int_sub(
             self.builder
                 .build_ptr_to_int(mem_high, intptr_type, "mem_high")?,
@@ -441,8 +577,9 @@ impl<'cxt> CodeGen<'cxt> {
             ],
             "",
         )?;
+        let ptrs = self.build_load_pointers::<C>(cxt_ptr)?;
         self.builder.build_unconditional_branch(next_block)?;
-        Ok(())
+        Ok((ptrs, second_block, fail_block))
     }
 
     fn compile_program<'a, C: CellType>(&self, program: &Block<C>) -> Result<(), BuilderError> {
@@ -491,13 +628,33 @@ impl<'cxt> CodeGen<'cxt> {
         let exit_block = self.context.append_basic_block(function, "exit");
         self.builder.position_at_end(entry_block);
         let cxt_ptr = function.get_nth_param(0).unwrap().into_pointer_value();
-        let (_, accessed) = self.compile_block(program, function, body_block, cxt_ptr, None)?;
+        let prev_ptrs = self.build_load_pointers::<C>(cxt_ptr)?;
+        self.builder.position_at_end(body_block);
+        let start_ptrs = [
+            self.builder.build_phi(ptr_type, "mem_low")?,
+            self.builder.build_phi(ptr_type, "mem_high")?,
+            self.builder.build_phi(ptr_type, "mem_ptr")?,
+        ];
+        let current_ptrs = [
+            start_ptrs[0].as_basic_value().into_pointer_value(),
+            start_ptrs[1].as_basic_value().into_pointer_value(),
+            start_ptrs[2].as_basic_value().into_pointer_value(),
+        ];
+        let (_, accessed, _) =
+            self.compile_block(program, function, cxt_ptr, body_block, current_ptrs, None)?;
         self.builder.build_unconditional_branch(exit_block)?;
         self.builder.position_at_end(entry_block);
         if let Some((start, end)) = accessed {
-            self.build_bounds_checks::<C>(function, body_block, cxt_ptr, start, end)?;
+            let (new_ptrs, ok_block, fail_block) = self
+                .build_bounds_checks::<C>(function, body_block, cxt_ptr, prev_ptrs, start, end)?;
+            start_ptrs[0].add_incoming(&[(&prev_ptrs[0], ok_block), (&new_ptrs[0], fail_block)]);
+            start_ptrs[1].add_incoming(&[(&prev_ptrs[1], ok_block), (&new_ptrs[1], fail_block)]);
+            start_ptrs[2].add_incoming(&[(&prev_ptrs[2], ok_block), (&new_ptrs[2], fail_block)]);
         } else {
             self.builder.build_unconditional_branch(body_block)?;
+            start_ptrs[0].add_incoming(&[(&prev_ptrs[0], entry_block)]);
+            start_ptrs[1].add_incoming(&[(&prev_ptrs[1], entry_block)]);
+            start_ptrs[2].add_incoming(&[(&prev_ptrs[2], entry_block)]);
         }
         self.builder.position_at_end(exit_block);
         self.builder.build_return(None)?;
