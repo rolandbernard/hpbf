@@ -810,7 +810,7 @@ impl<'cxt> CodeGen<'cxt> {
                 "break-crit-edges",
                 "loop-simplify",
                 "mem2reg",
-                "adce",
+                "gvn",
                 "loop-mssa(licm)",
                 "instcombine",
                 "reassociate",
