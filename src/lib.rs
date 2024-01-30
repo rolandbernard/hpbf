@@ -1,12 +1,14 @@
+//! Library for executing Brainfuck programs.
+
 mod ast;
 mod runtime;
 
 #[cfg(feature = "llvm")]
 mod codegen;
 
-use std::fmt::Debug;
+use std::{fmt::Debug, hash::Hash};
 
-pub use ast::{optimize, parse, Block, Instr};
+pub use ast::{Block, Instr, Program};
 pub use runtime::Context;
 
 /// Kind of error that might be encountered during the parsing of a Brainfuck
@@ -29,7 +31,7 @@ pub struct Error {
 }
 
 /// Only types implementing this trait are allowed for the cells.
-pub trait CellType: Copy + PartialEq + Debug {
+pub trait CellType: Copy + Ord + Hash + Debug {
     /// Number of bits of this type. Needed for code generation.
     const BITS: u32;
 
@@ -55,9 +57,6 @@ pub trait CellType: Copy + PartialEq + Debug {
     /// Return the value `x` such that `x.wrapping_add(self) == Self::ZERO`.
     fn wrapping_neg(self) -> Self;
 
-    /// Return true if the value is odd.
-    fn is_odd(self) -> bool;
-
     /// Bitwise and operation.
     fn bitand(self, rhs: Self) -> Self;
 
@@ -69,6 +68,11 @@ pub trait CellType: Copy + PartialEq + Debug {
 
     /// Returns the number of trailing zeros.
     fn trailing_zeros(self) -> u32;
+
+    /// Return true if the value is odd.
+    fn is_odd(self) -> bool {
+        self.bitand(Self::ONE) == Self::ONE
+    }
 
     /// Wrapping exponentiation.
     fn wrapping_pow(mut self, mut exp: Self) -> Self {
@@ -139,10 +143,6 @@ impl CellType for u8 {
         self.wrapping_neg()
     }
 
-    fn is_odd(self) -> bool {
-        self % 2 == 1
-    }
-
     fn bitand(self, rhs: Self) -> Self {
         self & rhs
     }
@@ -189,10 +189,6 @@ impl CellType for u16 {
 
     fn wrapping_neg(self) -> Self {
         self.wrapping_neg()
-    }
-
-    fn is_odd(self) -> bool {
-        self % 2 == 1
     }
 
     fn bitand(self, rhs: Self) -> Self {
@@ -243,10 +239,6 @@ impl CellType for u32 {
         self.wrapping_neg()
     }
 
-    fn is_odd(self) -> bool {
-        self % 2 == 1
-    }
-
     fn bitand(self, rhs: Self) -> Self {
         self & rhs
     }
@@ -293,10 +285,6 @@ impl CellType for u64 {
 
     fn wrapping_neg(self) -> Self {
         self.wrapping_neg()
-    }
-
-    fn is_odd(self) -> bool {
-        self % 2 == 1
     }
 
     fn bitand(self, rhs: Self) -> Self {

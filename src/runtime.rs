@@ -1,10 +1,14 @@
 //! Contains the runtime for Brainfuck and a simple interpreter.
 
 use std::{
-    alloc::{alloc_zeroed, dealloc, Layout}, io::{stdin, stdout, Read, Write}, mem, process::exit, ptr
+    alloc::{alloc_zeroed, dealloc, Layout},
+    io::{stdin, stdout, Read, Write},
+    mem,
+    process::exit,
+    ptr,
 };
 
-use crate::{Block, CellType, Instr};
+use crate::{CellType, Program};
 
 /// Context for the Brainfuck execution environment.
 #[repr(C)]
@@ -148,44 +152,8 @@ impl<'a, C: CellType> Context<'a, C> {
 
 impl<'a, C: CellType> Context<'a, C> {
     /// Interpreter based execution engine for Brainfuck.
-    pub fn execute(&mut self, program: &Block<C>) {
-        for instr in program {
-            match instr {
-                Instr::Move(offset) => {
-                    self.mov(*offset);
-                }
-                Instr::Load(val, dst) => {
-                    self.write(*dst, *val);
-                }
-                Instr::Add(val, dst) => {
-                    self.write(*dst, self.read(*dst).wrapping_add(*val));
-                }
-                Instr::MulAdd(val, src, dst) => {
-                    self.write(
-                        *dst,
-                        self.read(*dst)
-                            .wrapping_add(val.wrapping_mul(self.read(*src))),
-                    );
-                }
-                Instr::Output(src) => {
-                    self.output(self.read(*src).into_u8());
-                }
-                Instr::Input(dst) => {
-                    let val = self.input();
-                    self.write(*dst, C::from_u8(val));
-                }
-                Instr::Loop(cond, block) => {
-                    while self.read(*cond) != C::ZERO {
-                        self.execute(block);
-                    }
-                }
-                Instr::If(cond, block) => {
-                    if self.read(*cond) != C::ZERO {
-                        self.execute(block);
-                    }
-                }
-            }
-        }
+    pub fn execute(&mut self, _program: &Program<C>) {
+        todo!();
     }
 }
 
@@ -204,7 +172,7 @@ impl<'a, C: CellType> Drop for Context<'a, C> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{parse, Context, Error};
+    use crate::Context;
 
     #[test]
     fn reading_unused_cells_return_zero() {
@@ -297,117 +265,5 @@ mod tests {
         assert_eq!(ctx.input(), 42);
         assert_eq!(ctx.input(), 1);
         assert_eq!(ctx.input(), 3);
-    }
-
-    #[test]
-    fn simple_execution() -> Result<(), Error> {
-        let mut buf = Vec::new();
-        let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
-        ctx.execute(&parse(
-            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
-            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
-        )?);
-        drop(ctx);
-        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
-        Ok(())
-    }
-
-    #[test]
-    fn simple_execution_u16() -> Result<(), Error> {
-        let mut buf = Vec::new();
-        let mut ctx = Context::<u16>::new(None, Some(Box::new(&mut buf)));
-        ctx.execute(&parse(
-            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
-            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
-        )?);
-        drop(ctx);
-        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
-        Ok(())
-    }
-
-    #[test]
-    fn simple_execution_u32() -> Result<(), Error> {
-        let mut buf = Vec::new();
-        let mut ctx = Context::<u32>::new(None, Some(Box::new(&mut buf)));
-        ctx.execute(&parse(
-            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
-            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
-        )?);
-        drop(ctx);
-        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
-        Ok(())
-    }
-
-    #[test]
-    fn simple_execution_u64() -> Result<(), Error> {
-        let mut buf = Vec::new();
-        let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
-        ctx.execute(&parse(
-            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
-            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
-        )?);
-        drop(ctx);
-        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
-        Ok(())
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore)]
-    fn test_program_access_distant_cell() -> Result<(), Error> {
-        let mut buf = Vec::new();
-        let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
-        ctx.execute(&parse(
-            "++++[>++++++<-]>[>+++++>+++++++<<-]>>++++<[[>[[
-            >>+<<-]<]>>>-]>-[>+>+<<-]>]+++++[>+++++++<<++>-]>.<<.",
-        )?);
-        drop(ctx);
-        assert_eq!(String::from_utf8(buf).unwrap(), "#\n");
-        Ok(())
-    }
-
-    #[test]
-    fn test_program_output_h() -> Result<(), Error> {
-        let mut buf = Vec::new();
-        let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
-        ctx.execute(&parse(
-            "[]++++++++++[>>+>+>++++++[<<+<+++>>>-]<<<<-]
-            \"A*$\";?@![#>>+<<]>[>>]<<<<[>++<[-]]>.>.",
-        )?);
-        drop(ctx);
-        assert_eq!(String::from_utf8(buf).unwrap(), "H\n");
-        Ok(())
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore)]
-    fn test_program_rot13() -> Result<(), Error> {
-        let mut buf = Vec::new();
-        let mut ctx = Context::<u8>::new(
-            Some(Box::new("~mlk zyx".as_bytes())),
-            Some(Box::new(&mut buf)),
-        );
-        ctx.execute(&parse(
-            ",
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>++++++++++++++<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>>+++++[<----->-]<<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>++++++++++++++<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-
-            [>++++++++++++++<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>>+++++[<----->-]<<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>++++++++++++++<-
-            [>+<-]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
-            ]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]>.[-]<,]",
-        )?);
-        drop(ctx);
-        assert_eq!(String::from_utf8(buf).unwrap(), "~zyx mlk");
-        Ok(())
     }
 }

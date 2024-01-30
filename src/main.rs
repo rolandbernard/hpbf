@@ -1,6 +1,8 @@
+//! Main application that allows execution of Brainfuck programs.
+
 use std::{env, fs::File, io::Read, process::exit};
 
-use hpbf::{optimize, parse, Block, CellType, Context, Error, ErrorKind};
+use hpbf::{CellType, Context, Error, ErrorKind, Program};
 
 fn print_help_text() {
     println!(
@@ -46,7 +48,7 @@ fn print_error(code: &str, error: Error) {
 fn execute_in_context<C: CellType>(
     cxt: &mut Context<C>,
     _opt: u32,
-    prog: Block<C>,
+    prog: Program<C>,
     print_ir: bool,
 ) -> bool {
     if print_ir {
@@ -61,7 +63,7 @@ fn execute_in_context<C: CellType>(
 fn execute_in_context<C: CellType>(
     cxt: &mut Context<C>,
     opt: u32,
-    prog: Block<C>,
+    prog: Program<C>,
     print_ir: bool,
 ) -> bool {
     if let Err(str) = if print_ir {
@@ -82,43 +84,32 @@ fn execute_in_context<C: CellType>(
 }
 
 fn execute_code<C: CellType>(
-    code_segments: Vec<String>,
+    code: String,
     no_opt: bool,
     opt: u32,
     no_jit: bool,
     print_ir: bool,
 ) -> bool {
-    let mut has_error = false;
-    let mut program = Block::new();
-    for code in code_segments {
-        match parse(&code) {
-            Ok(mut prog) => {
-                if !has_error {
-                    program.append(&mut prog);
+    match Program::parse(&code) {
+        Ok(program) => {
+            let prog = if no_opt { program } else { program };
+            let mut cxt = Context::<C>::with_stdio();
+            if no_jit {
+                if print_ir {
+                    eprintln!("{:?}", prog);
+                } else {
+                    cxt.execute(&prog);
                 }
-            }
-            Err(error) => {
-                print_error(&code, error);
-                has_error = true;
-            }
-        }
-    }
-    if !has_error {
-        let prog = if no_opt { program } else { optimize(program) };
-        let mut cxt = Context::<C>::with_stdio();
-        if no_jit {
-            if print_ir {
-                eprintln!("{:?}", prog);
+                return true;
             } else {
-                cxt.execute(&prog);
-            }
-        } else {
-            if execute_in_context(&mut cxt, opt, prog, print_ir) {
-                has_error = true;
+                return execute_in_context(&mut cxt, opt, prog, print_ir);
             }
         }
+        Err(error) => {
+            print_error(&code, error);
+            return true;
+        }
     }
-    return has_error;
 }
 
 fn main() {
@@ -130,7 +121,7 @@ fn main() {
     let mut opt = 1;
     let mut has_error = false;
     let mut next_is_file = false;
-    let mut code_segments = Vec::new();
+    let mut code = String::new();
     for arg in env::args().skip(1) {
         if next_is_file {
             next_is_file = false;
@@ -147,7 +138,7 @@ fn main() {
                         );
                         has_error = true;
                     } else {
-                        code_segments.push(text);
+                        code.push_str(&text);
                     }
                 }
                 Err(_) => {
@@ -177,7 +168,7 @@ fn main() {
                 "-i64" => bits = 64,
                 "-h" | "-help" | "--help" => print_help = true,
                 "-f" | "-file" | "--file" => next_is_file = true,
-                _ => code_segments.push(arg),
+                _ => code.push_str(&arg),
             }
         }
     }
@@ -185,10 +176,10 @@ fn main() {
         print_help_text();
     } else {
         if match bits {
-            8 => execute_code::<u8>(code_segments, no_opt, opt, no_jit, print_ir),
-            16 => execute_code::<u16>(code_segments, no_opt, opt, no_jit, print_ir),
-            32 => execute_code::<u32>(code_segments, no_opt, opt, no_jit, print_ir),
-            64 => execute_code::<u64>(code_segments, no_opt, opt, no_jit, print_ir),
+            8 => execute_code::<u8>(code, no_opt, opt, no_jit, print_ir),
+            16 => execute_code::<u16>(code, no_opt, opt, no_jit, print_ir),
+            32 => execute_code::<u32>(code, no_opt, opt, no_jit, print_ir),
+            64 => execute_code::<u64>(code, no_opt, opt, no_jit, print_ir),
             _ => panic!("unsupported cell size"),
         } {
             has_error = true;
