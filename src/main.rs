@@ -124,7 +124,7 @@ fn execute_code<C: CellType>(
 fn main() {
     let mut bits = 8;
     let mut print_help = false;
-    let mut no_jit = false;
+    let mut no_jit = true;
     let mut print_ir = false;
     let mut no_opt = false;
     let mut opt = 1;
