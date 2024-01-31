@@ -6,24 +6,30 @@ use crate::{CellType, Error, ErrorKind};
 
 /// Represents a complete Brainfuck program.
 #[derive(Clone, PartialEq, Debug)]
-pub struct Program<C: CellType>(pub usize, pub Vec<Block<C>>);
+pub struct Program<C: CellType> {
+    pub entry: usize,
+    pub blocks: Vec<Block<C>>,
+}
 
 /// Represents the inside of a loop.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct Block<C: CellType>(pub isize, pub Vec<Instr<C>>);
+pub struct Block<C: CellType> {
+    pub shift: isize,
+    pub insts: Vec<Instr<C>>,
+}
 
 /// This represents a Brainfuck instruction. It includes not only the basic
 /// Brainfuck instructions, but also some additional operations that are common
 /// in Brainfuck and help the backend to generate better code.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Instr<C: CellType> {
-    Output(isize),
-    Input(isize),
-    Load(C, isize),
-    Add(C, isize),
-    MulAdd(C, isize, isize),
-    Loop(isize, usize),
-    If(isize, usize),
+    Output { src: isize },
+    Input { dst: isize },
+    Load { val: C, dst: isize },
+    Add { val: C, dst: isize },
+    MulAdd { val: C, src: isize, dst: isize },
+    Loop { cond: isize, block: usize },
+    If { cond: isize, block: usize },
 }
 
 impl<C: CellType> Program<C> {
@@ -39,19 +45,31 @@ impl<C: CellType> Program<C> {
     /// let prog = Program::<u8>::parse("+[-->-[>>+>-----<<]<--<---]>-.>>>+.>>..+++[.>]<<<<.+++.------.<<-.>>>>+.")?;
     ///
     /// assert_eq!(prog,
-    ///     Program(
-    ///         3,
-    ///         vec![
-    ///             Block(1, vec![Add(1, 2), Add(251, 3)]),
-    ///             Block(-1, vec![Add(255, 1), Add(254, 0), Loop(1, 0), Add(253, -1), Add(254, 0)]),
-    ///             Block(1, vec![Output(0)]),
-    ///             Block(4, vec![
-    ///                 Add(1, 0), Loop(0, 1), Add(255, 1), Output(1), Add(1, 4), Output(4), Output(6),
-    ///                 Output(6), Add(3, 6), Loop(6, 2), Output(2), Add(3, 2), Output(2), Add(250, 2),
-    ///                 Output(2), Add(255, 0), Output(0), Add(1, 4), Output(4)
-    ///             ]),
+    ///     Program {
+    ///         entry: 3,
+    ///         blocks: vec![
+    ///             Block { shift: 1, insts: vec![
+    ///                 Add { val: 1, dst: 2 }, Add { val: 251, dst: 3 }
+    ///             ]},
+    ///             Block { shift: -1, insts: vec![
+    ///                 Add { val: 254, dst: 0 }, Add { val: 255, dst: 1 },
+    ///                 Loop { cond: 1, block: 0 }, Add { val: 253, dst: -1 },
+    ///                 Add { val: 254, dst: 0 }
+    ///             ]},
+    ///             Block { shift: 1, insts: vec![Output { src: 0 }]},
+    ///             Block { shift: 4, insts: vec![
+    ///                 Add { val: 1, dst: 0 }, Loop { cond: 0, block: 1 },
+    ///                 Add { val: 255, dst: 1 }, Output { src: 1 },
+    ///                 Add { val: 1, dst: 4 }, Output { src: 4 }, Output { src: 6 },
+    ///                 Output { src: 6 }, Add { val: 3, dst: 6 },
+    ///                 Loop { cond: 6, block: 2 }, Output { src: 2 },
+    ///                 Add { val: 3, dst: 2 }, Output { src: 2 },
+    ///                 Add { val: 250, dst: 2 }, Output { src: 2 },
+    ///                 Add { val: 255, dst: 0 }, Output { src: 0 },
+    ///                 Add { val: 1, dst: 4 }, Output { src: 4 },
+    ///             ]},
     ///         ]
-    ///     )
+    ///     }
     /// );
     /// # Ok::<(), Error>(())
     /// ```
@@ -60,40 +78,38 @@ impl<C: CellType> Program<C> {
         let mut stack = vec![(0, false, Vec::new(), HashMap::new())];
         let mut positions = vec![];
         for (i, char) in program.as_ref().chars().enumerate() {
-            let (off, _, insts, buff) = stack.last_mut().unwrap();
+            let (shift, _, insts, buff) = stack.last_mut().unwrap();
             match char {
                 '>' => {
-                    *off += 1;
+                    *shift += 1;
                 }
                 '<' => {
-                    *off -= 1;
+                    *shift -= 1;
                 }
                 '+' => {
-                    let val = buff.entry(*off).or_insert(C::ZERO);
+                    let val = buff.entry(*shift).or_insert(C::ZERO);
                     *val = val.wrapping_add(C::ONE);
                 }
                 '-' => {
-                    let val = buff.entry(*off).or_insert(C::ZERO);
+                    let val = buff.entry(*shift).or_insert(C::ZERO);
                     *val = val.wrapping_add(C::NEG_ONE);
                 }
                 '.' => {
-                    let val = buff.entry(*off).or_insert(C::ZERO);
+                    let val = buff.entry(*shift).or_insert(C::ZERO);
                     if *val != C::ZERO {
-                        insts.push(Instr::Add(*val, *off));
+                        insts.push(Instr::Add {
+                            val: *val,
+                            dst: *shift,
+                        });
                         *val = C::ZERO;
                     }
-                    insts.push(Instr::Output(*off));
+                    insts.push(Instr::Output { src: *shift });
                 }
                 ',' => {
-                    insts.push(Instr::Input(*off));
-                    buff.insert(*off, C::ZERO);
+                    insts.push(Instr::Input { dst: *shift });
+                    buff.insert(*shift, C::ZERO);
                 }
                 '[' => {
-                    let val = buff.entry(*off).or_insert(C::ZERO);
-                    if *val != C::ZERO {
-                        insts.push(Instr::Add(*val, *off));
-                        *val = C::ZERO;
-                    }
                     positions.push(i);
                     stack.push((0, false, Vec::new(), HashMap::new()));
                 }
@@ -105,30 +121,39 @@ impl<C: CellType> Program<C> {
                         });
                     }
                     positions.pop();
-                    let (sub_offset, sub_moved, mut sub_insts, sub_buff) = stack.pop().unwrap();
+                    let (sub_shift, sub_moved, mut sub_insts, sub_buff) = stack.pop().unwrap();
                     let mut vars = sub_buff.into_iter().collect::<Vec<_>>();
                     vars.sort();
                     for &(var, val) in &vars {
                         if val != C::ZERO {
-                            sub_insts.push(Instr::Add(val, var));
+                            sub_insts.push(Instr::Add { val, dst: var });
                         }
                     }
-                    let (off, moved, insts, buff) = stack.last_mut().unwrap();
+                    let (shift, moved, insts, buff) = stack.last_mut().unwrap();
                     if sub_insts.len() == 1
-                        && matches!(sub_insts[0], Instr::Add(c, 0) if c.is_odd())
+                        && matches!(sub_insts[0], Instr::Add{val:c, dst:0} if c.is_odd())
                     {
-                        insts.push(Instr::Load(C::ZERO, *off));
-                        buff.insert(*off, C::ZERO);
+                        insts.push(Instr::Load {
+                            val: C::ZERO,
+                            dst: *shift,
+                        });
+                        buff.insert(*shift, C::ZERO);
                     } else {
                         let block_id = blocks.len();
                         let block_id = *blocks
-                            .entry(Block(sub_offset, sub_insts))
+                            .entry(Block {
+                                shift: sub_shift,
+                                insts: sub_insts,
+                            })
                             .or_insert(block_id);
-                        if sub_offset == 0 && !sub_moved {
+                        if sub_shift == 0 && !sub_moved {
                             for (var, _) in vars {
-                                if let Some(v) = buff.get_mut(&(*off + var)) {
+                                if let Some(v) = buff.get_mut(&(*shift + var)) {
                                     if *v != C::ZERO {
-                                        insts.push(Instr::Add(*v, *off + var));
+                                        insts.push(Instr::Add {
+                                            val: *v,
+                                            dst: *shift + var,
+                                        });
                                         *v = C::ZERO;
                                     }
                                 }
@@ -138,13 +163,27 @@ impl<C: CellType> Program<C> {
                             vars.sort();
                             for (var, val) in vars {
                                 if *val != C::ZERO {
-                                    insts.push(Instr::Add(*val, *var));
+                                    insts.push(Instr::Add {
+                                        val: *val,
+                                        dst: *var,
+                                    });
                                     *val = C::ZERO;
                                 }
                             }
                             *moved = true;
                         }
-                        insts.push(Instr::Loop(*off, block_id));
+                        let val = buff.entry(*shift).or_insert(C::ZERO);
+                        if *val != C::ZERO {
+                            insts.push(Instr::Add {
+                                val: *val,
+                                dst: *shift,
+                            });
+                            *val = C::ZERO;
+                        }
+                        insts.push(Instr::Loop {
+                            cond: *shift,
+                            block: block_id,
+                        });
                     }
                 }
                 _ => { /* comment */ }
@@ -156,19 +195,28 @@ impl<C: CellType> Program<C> {
                 position: *positions.last().unwrap(),
             });
         }
-        let (offset, _, mut insts, vars) = stack.pop().unwrap();
+        let (shift, _, mut insts, vars) = stack.pop().unwrap();
         let mut vars = vars.into_iter().collect::<Vec<_>>();
         vars.sort();
         for (var, val) in vars {
             if val != C::ZERO {
-                insts.push(Instr::Add(val, var));
+                insts.push(Instr::Add { val, dst: var });
             }
         }
         let block_id = blocks.len();
-        blocks.insert(Block(offset, insts), block_id);
-        let mut program = Program(block_id, vec![Block(0, Vec::new()); blocks.len()]);
+        blocks.insert(Block { shift, insts }, block_id);
+        let mut program = Program {
+            entry: block_id,
+            blocks: vec![
+                Block {
+                    shift: 0,
+                    insts: Vec::new()
+                };
+                blocks.len()
+            ],
+        };
         for (block, idx) in blocks {
-            program.1[idx] = block;
+            program.blocks[idx] = block;
         }
         return Ok(program);
     }
@@ -184,13 +232,24 @@ mod tests {
         let prog = Program::<u8>::parse("+++++[>[-],.<--]")?;
         assert_eq!(
             prog,
-            Program(
-                1,
-                vec![
-                    Block(0, vec![Load(0, 1), Input(1), Output(1), Add(254, 0)]),
-                    Block(0, vec![Add(5, 0), Loop(0, 0)])
+            Program {
+                entry: 1,
+                blocks: vec![
+                    Block {
+                        shift: 0,
+                        insts: vec![
+                            Load { val: 0, dst: 1 },
+                            Input { dst: 1 },
+                            Output { src: 1 },
+                            Add { val: 254, dst: 0 }
+                        ]
+                    },
+                    Block {
+                        shift: 0,
+                        insts: vec![Add { val: 5, dst: 0 }, Loop { cond: 0, block: 0 }]
+                    },
                 ]
-            )
+            }
         );
         Ok(())
     }

@@ -1,6 +1,7 @@
 //! Library for executing Brainfuck programs.
 
 mod ast;
+mod opt;
 mod runtime;
 
 #[cfg(feature = "llvm")]

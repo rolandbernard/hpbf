@@ -155,42 +155,42 @@ impl<'a, C: CellType> Context<'a, C> {
     /// have to be part of the program, but all loops and ifs must refer to blocks
     /// within the program.
     fn execute_block(&mut self, program: &Program<C>, block: &Block<C>) {
-        for instr in &block.1 {
+        for instr in &block.insts {
             match *instr {
-                Instr::Output(src) => {
+                Instr::Output { src } => {
                     self.output(self.read(src).into_u8());
                 }
-                Instr::Input(dst) => {
+                Instr::Input { dst } => {
                     let val = C::from_u8(self.input());
                     self.write(dst, val);
                 }
-                Instr::Load(val, dst) => {
+                Instr::Load { val, dst } => {
                     self.write(dst, val);
                 }
-                Instr::Add(val, dst) => {
+                Instr::Add { val, dst } => {
                     let val = val.wrapping_add(self.read(dst));
                     self.write(dst, val);
                 }
-                Instr::MulAdd(val, src, dst) => {
+                Instr::MulAdd { val, src, dst } => {
                     let val = val
                         .wrapping_mul(self.read(src))
                         .wrapping_add(self.read(dst));
                     self.write(dst, val);
                 }
-                Instr::Loop(cond, block) => {
-                    let block = &program.1[block];
+                Instr::Loop { cond, block } => {
+                    let block = &program.blocks[block];
                     while self.read(cond) != C::ZERO {
                         self.mov(cond);
                         self.execute_block(program, block);
-                        self.mov(block.0 - cond);
+                        self.mov(block.shift - cond);
                     }
                 }
-                Instr::If(cond, block) => {
+                Instr::If { cond, block } => {
                     if self.read(cond) != C::ZERO {
                         self.mov(cond);
-                        let block = &program.1[block];
+                        let block = &program.blocks[block];
                         self.execute_block(program, block);
-                        self.mov(block.0 - cond);
+                        self.mov(block.shift - cond);
                     }
                 }
             }
@@ -199,7 +199,7 @@ impl<'a, C: CellType> Context<'a, C> {
 
     /// Interpreter based execution engine for Brainfuck.
     pub fn execute(&mut self, program: &Program<C>) {
-        self.execute_block(program, &program.1[program.0]);
+        self.execute_block(program, &program.blocks[program.entry]);
     }
 }
 

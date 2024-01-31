@@ -52,7 +52,7 @@ fn execute_in_context<C: CellType>(
     print_ir: bool,
 ) -> bool {
     if print_ir {
-        eprintln!("{:?}", prog);
+        eprintln!("{:#?}", prog);
     } else {
         cxt.execute(&prog);
     }
@@ -92,11 +92,11 @@ fn execute_code<C: CellType>(
 ) -> bool {
     match Program::parse(&code) {
         Ok(program) => {
-            let prog = if no_opt { program } else { program };
+            let prog = if no_opt { program } else { program.optimize() };
             let mut cxt = Context::<C>::with_stdio();
             if no_jit {
                 if print_ir {
-                    eprintln!("{:?}", prog);
+                    eprintln!("{:#?}", prog);
                 } else {
                     cxt.execute(&prog);
                 }
