@@ -3,21 +3,20 @@
 use std::{
     alloc::{alloc_zeroed, dealloc, Layout},
     io::{stdin, stdout, Read, Write},
-    mem,
     process::exit,
     ptr,
 };
 
-use crate::{CellType, Program};
+use crate::{Block, CellType, Instr, Program};
 
 /// Context for the Brainfuck execution environment.
 #[repr(C)]
 pub struct Context<'a, C: CellType> {
     // Do not change the order or position of the three first fields. They are
     // used by the code generated in the jit compiler.
-    mem_low: *mut C,
-    mem_high: *mut C,
-    mem_ptr: *mut C,
+    memory: *mut C,
+    size: usize,
+    offset: usize,
     input: Option<Box<dyn Read + 'a>>,
     output: Option<Box<dyn Write + 'a>>,
 }
@@ -26,9 +25,9 @@ impl<'a, C: CellType> Context<'a, C> {
     /// Create a new context for executing a Brainfuck program.
     pub fn new(input: Option<Box<dyn Read + 'a>>, output: Option<Box<dyn Write + 'a>>) -> Self {
         Context {
-            mem_low: ptr::null_mut(),
-            mem_high: ptr::null_mut(),
-            mem_ptr: ptr::null_mut(),
+            memory: ptr::null_mut(),
+            size: 0,
+            offset: 0,
             input,
             output,
         }
@@ -46,32 +45,34 @@ impl<'a, C: CellType> Context<'a, C> {
 
     /// Move the current pointer. No memory will be allocated.
     pub fn mov(&mut self, offset: isize) {
-        self.mem_ptr = self.mem_ptr.wrapping_offset(offset);
+        self.offset = self.offset.wrapping_add_signed(offset);
     }
 
     /// Read from the given offset from the current pointer. Reading from
     /// outside the currently allocated memory buffer will not allocate new
     /// memory, but immediately return zero.
     pub fn read(&self, offset: isize) -> C {
-        let ptr = self.mem_ptr.wrapping_offset(offset);
-        if self.mem_low <= ptr && ptr < self.mem_high {
-            // SAFETY: The area from `mem_low` to `mem_high` can safely be accessed.
-            unsafe { ptr.read() }
+        let ptr = self.offset.wrapping_add_signed(offset);
+        if ptr < self.size {
+            // SAFETY: The area from `memory` can safely be accessed up to `size`.
+            unsafe { self.memory.add(ptr).read() }
         } else {
             C::ZERO
         }
     }
 
+    /// Make sure that subsequent calls to [`Self::read`] and [`Self::write`] will
+    /// not cause a bounds check failure for offsets in the range `start..end`.
     pub fn make_accessible(&mut self, start: isize, end: isize) {
-        let old_size =
-            (self.mem_high as isize - self.mem_low as isize) / mem::size_of::<C>() as isize;
-        let old_ptr =
-            (self.mem_ptr as isize - self.mem_low as isize) / mem::size_of::<C>() as isize;
-        let min_ptr = old_ptr + start;
-        let max_ptr = old_ptr + end;
-        let needed_below = if min_ptr < 0 { min_ptr.abs() } else { 0 };
-        let needed_above = if max_ptr > old_size {
-            max_ptr - old_size
+        let start_ptr = (self.offset as isize).wrapping_add(start);
+        let end_ptr = (self.offset as isize).wrapping_add(end);
+        let needed_below = if start_ptr < 0 {
+            start_ptr.abs() as usize
+        } else {
+            0
+        };
+        let needed_above = if end_ptr > self.size as isize {
+            (end_ptr - self.size as isize) as usize
         } else {
             0
         };
@@ -79,47 +80,46 @@ impl<'a, C: CellType> Context<'a, C> {
             // No resize is needed.
             return;
         }
-        let new_size = old_size + (old_size / 2).max(needed_below + needed_above);
+        let new_size = self.size + (self.size / 2).max(needed_below + needed_above);
         let added_below = match (needed_below, needed_above) {
             (0, _) => 0,
-            (_, 0) => new_size - old_size,
+            (_, 0) => new_size - self.size,
             (_, _) => needed_below
-                .max((new_size - old_size) / 2)
-                .min(new_size - old_size - needed_above),
+                .max((new_size - self.size) / 2)
+                .min(new_size - self.size - needed_above),
         };
-        let new_layout = Layout::array::<C>(new_size as usize).unwrap();
+        let new_layout = Layout::array::<C>(new_size).unwrap();
         // SAFETY: Layout is never zero-sized.
         let new_buffer = unsafe { alloc_zeroed(new_layout) as *mut C };
-        if old_size != 0 {
+        if self.size != 0 {
             // SAFETY: If the old size is non-zero, the old region is valid.
             unsafe {
-                self.mem_low
-                    .copy_to_nonoverlapping(new_buffer.offset(added_below), old_size as usize);
-                let old_layout = Layout::array::<C>(old_size as usize).unwrap();
-                dealloc(self.mem_low as *mut u8, old_layout);
+                self.memory
+                    .copy_to_nonoverlapping(new_buffer.wrapping_add(added_below), self.size);
+                let old_layout = Layout::array::<C>(self.size).unwrap();
+                dealloc(self.memory as *mut u8, old_layout);
             }
         }
-        self.mem_low = new_buffer;
-        self.mem_ptr = new_buffer.wrapping_offset(old_ptr + added_below);
-        // SAFETY: The result will be one byte past the allocation.
-        self.mem_high = unsafe { new_buffer.offset(new_size) };
+        self.memory = new_buffer;
+        self.size = new_size;
+        self.offset = self.offset.wrapping_add(added_below);
     }
 
     #[cold]
     fn write_out_of_bounds(&mut self, offset: isize, value: C) {
         self.make_accessible(offset, offset + 1);
-        let ptr = self.mem_ptr.wrapping_offset(offset);
+        let ptr = self.offset.wrapping_add_signed(offset);
         // SAFETY: `make_accessible` ensures that `ptr` can be written safely.
-        unsafe { ptr.write(value) }
+        unsafe { self.memory.add(ptr).write(value) }
     }
 
     /// Write to the given offset from the current pointer. If the currently
     /// allocated memory buffer is exceeded, new memory will be allocated.
     pub fn write(&mut self, offset: isize, value: C) {
-        let ptr = self.mem_ptr.wrapping_offset(offset);
-        if self.mem_low <= ptr && ptr < self.mem_high {
-            // SAFETY: The area from `mem_low` to `mem_high` can safely be accessed.
-            unsafe { ptr.write(value) }
+        let ptr = self.offset.wrapping_add_signed(offset);
+        if ptr < self.size {
+            // SAFETY: The area from `memory` can safely be accessed up to `size`.
+            unsafe { self.memory.add(ptr).write(value) }
         } else {
             self.write_out_of_bounds(offset, value);
         }
@@ -151,20 +151,65 @@ impl<'a, C: CellType> Context<'a, C> {
 }
 
 impl<'a, C: CellType> Context<'a, C> {
+    /// Execute a single block within the given program. The block does not necessary
+    /// have to be part of the program, but all loops and ifs must refer to blocks
+    /// within the program.
+    fn execute_block(&mut self, program: &Program<C>, block: &Block<C>) {
+        for instr in &block.1 {
+            match *instr {
+                Instr::Output(src) => {
+                    self.output(self.read(src).into_u8());
+                }
+                Instr::Input(dst) => {
+                    let val = C::from_u8(self.input());
+                    self.write(dst, val);
+                }
+                Instr::Load(val, dst) => {
+                    self.write(dst, val);
+                }
+                Instr::Add(val, dst) => {
+                    let val = val.wrapping_add(self.read(dst));
+                    self.write(dst, val);
+                }
+                Instr::MulAdd(val, src, dst) => {
+                    let val = val
+                        .wrapping_mul(self.read(src))
+                        .wrapping_add(self.read(dst));
+                    self.write(dst, val);
+                }
+                Instr::Loop(cond, block) => {
+                    let block = &program.1[block];
+                    while self.read(cond) != C::ZERO {
+                        self.mov(cond);
+                        self.execute_block(program, block);
+                        self.mov(block.0 - cond);
+                    }
+                }
+                Instr::If(cond, block) => {
+                    if self.read(cond) != C::ZERO {
+                        self.mov(cond);
+                        let block = &program.1[block];
+                        self.execute_block(program, block);
+                        self.mov(block.0 - cond);
+                    }
+                }
+            }
+        }
+    }
+
     /// Interpreter based execution engine for Brainfuck.
-    pub fn execute(&mut self, _program: &Program<C>) {
-        todo!();
+    pub fn execute(&mut self, program: &Program<C>) {
+        self.execute_block(program, &program.1[program.0]);
     }
 }
 
 impl<'a, C: CellType> Drop for Context<'a, C> {
     fn drop(&mut self) {
-        let old_size = (self.mem_high as usize - self.mem_low as usize) / mem::size_of::<C>();
-        if old_size != 0 {
+        if self.size != 0 {
             // SAFETY: If the old size is non-zero, the old region is valid.
             unsafe {
-                let old_layout = Layout::array::<C>(old_size).unwrap();
-                dealloc(self.mem_low as *mut u8, old_layout);
+                let old_layout = Layout::array::<C>(self.size).unwrap();
+                dealloc(self.memory as *mut u8, old_layout);
             }
         }
     }
@@ -172,7 +217,7 @@ impl<'a, C: CellType> Drop for Context<'a, C> {
 
 #[cfg(test)]
 mod tests {
-    use crate::Context;
+    use crate::{Context, Error, Program};
 
     #[test]
     fn reading_unused_cells_return_zero() {
@@ -265,5 +310,117 @@ mod tests {
         assert_eq!(ctx.input(), 42);
         assert_eq!(ctx.input(), 1);
         assert_eq!(ctx.input(), 3);
+    }
+
+    #[test]
+    fn simple_execution() -> Result<(), Error> {
+        let mut buf = Vec::new();
+        let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
+        ctx.execute(&Program::parse(
+            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
+            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
+        )?);
+        drop(ctx);
+        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
+        Ok(())
+    }
+
+    #[test]
+    fn simple_execution_u16() -> Result<(), Error> {
+        let mut buf = Vec::new();
+        let mut ctx = Context::<u16>::new(None, Some(Box::new(&mut buf)));
+        ctx.execute(&Program::parse(
+            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
+            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
+        )?);
+        drop(ctx);
+        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
+        Ok(())
+    }
+
+    #[test]
+    fn simple_execution_u32() -> Result<(), Error> {
+        let mut buf = Vec::new();
+        let mut ctx = Context::<u32>::new(None, Some(Box::new(&mut buf)));
+        ctx.execute(&Program::parse(
+            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
+            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
+        )?);
+        drop(ctx);
+        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
+        Ok(())
+    }
+
+    #[test]
+    fn simple_execution_u64() -> Result<(), Error> {
+        let mut buf = Vec::new();
+        let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
+        ctx.execute(&Program::parse(
+            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
+            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
+        )?);
+        drop(ctx);
+        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_program_access_distant_cell() -> Result<(), Error> {
+        let mut buf = Vec::new();
+        let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
+        ctx.execute(&Program::parse(
+            "++++[>++++++<-]>[>+++++>+++++++<<-]>>++++<[[>[[
+            >>+<<-]<]>>>-]>-[>+>+<<-]>]+++++[>+++++++<<++>-]>.<<.",
+        )?);
+        drop(ctx);
+        assert_eq!(String::from_utf8(buf).unwrap(), "#\n");
+        Ok(())
+    }
+
+    #[test]
+    fn test_program_output_h() -> Result<(), Error> {
+        let mut buf = Vec::new();
+        let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
+        ctx.execute(&Program::parse(
+            "[]++++++++++[>>+>+>++++++[<<+<+++>>>-]<<<<-]
+            \"A*$\";?@![#>>+<<]>[>>]<<<<[>++<[-]]>.>.",
+        )?);
+        drop(ctx);
+        assert_eq!(String::from_utf8(buf).unwrap(), "H\n");
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_program_rot13() -> Result<(), Error> {
+        let mut buf = Vec::new();
+        let mut ctx = Context::<u8>::new(
+            Some(Box::new("~mlk zyx".as_bytes())),
+            Some(Box::new(&mut buf)),
+        );
+        ctx.execute(&Program::parse(
+            ",
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>++++++++++++++<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>>+++++[<----->-]<<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>++++++++++++++<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-
+            [>++++++++++++++<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>>+++++[<----->-]<<-
+            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>++++++++++++++<-
+            [>+<-]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
+            ]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]>.[-]<,]",
+        )?);
+        drop(ctx);
+        assert_eq!(String::from_utf8(buf).unwrap(), "~zyx mlk");
+        Ok(())
     }
 }

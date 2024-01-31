@@ -100,7 +100,7 @@ fn execute_code<C: CellType>(
                 } else {
                     cxt.execute(&prog);
                 }
-                return true;
+                return false;
             } else {
                 return execute_in_context(&mut cxt, opt, prog, print_ir);
             }

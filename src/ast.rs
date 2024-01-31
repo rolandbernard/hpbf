@@ -43,7 +43,7 @@ impl<C: CellType> Program<C> {
     ///         3,
     ///         vec![
     ///             Block(1, vec![Add(1, 2), Add(251, 3)]),
-    ///             Block(-1, vec![Add(254, 0), Add(255, 1), Loop(1, 0), Add(253, -1), Add(254, 0)]),
+    ///             Block(-1, vec![Add(255, 1), Add(254, 0), Loop(1, 0), Add(253, -1), Add(254, 0)]),
     ///             Block(1, vec![Output(0)]),
     ///             Block(4, vec![
     ///                 Add(1, 0), Loop(0, 1), Add(255, 1), Output(1), Add(1, 4), Output(4), Output(6),
@@ -57,41 +57,45 @@ impl<C: CellType> Program<C> {
     /// ```
     pub fn parse(program: impl AsRef<str>) -> Result<Self, Error> {
         let mut blocks = HashMap::new();
-        let mut stack = vec![(0, Vec::new(), HashMap::new())];
+        let mut stack = vec![(0, false, Vec::new(), HashMap::new())];
         let mut positions = vec![];
         for (i, char) in program.as_ref().chars().enumerate() {
-            let top = stack.last_mut().unwrap();
+            let (off, _, insts, buff) = stack.last_mut().unwrap();
             match char {
                 '>' => {
-                    top.0 += 1;
+                    *off += 1;
                 }
                 '<' => {
-                    top.0 -= 1;
+                    *off -= 1;
                 }
                 '+' => {
-                    let val = top.2.entry(top.0).or_insert(C::ZERO);
+                    let val = buff.entry(*off).or_insert(C::ZERO);
                     *val = val.wrapping_add(C::ONE);
                 }
                 '-' => {
-                    let val = top.2.entry(top.0).or_insert(C::ZERO);
+                    let val = buff.entry(*off).or_insert(C::ZERO);
                     *val = val.wrapping_add(C::NEG_ONE);
                 }
                 '.' => {
-                    if let Some(v) = top.2.get_mut(&top.0) {
-                        if *v != C::ZERO {
-                            top.1.push(Instr::Add(*v, top.0));
-                            *v = C::ZERO;
-                        }
+                    let val = buff.entry(*off).or_insert(C::ZERO);
+                    if *val != C::ZERO {
+                        insts.push(Instr::Add(*val, *off));
+                        *val = C::ZERO;
                     }
-                    top.1.push(Instr::Output(top.0));
+                    insts.push(Instr::Output(*off));
                 }
                 ',' => {
-                    top.1.push(Instr::Input(top.0));
-                    top.2.remove(&top.0);
+                    insts.push(Instr::Input(*off));
+                    buff.insert(*off, C::ZERO);
                 }
                 '[' => {
+                    let val = buff.entry(*off).or_insert(C::ZERO);
+                    if *val != C::ZERO {
+                        insts.push(Instr::Add(*val, *off));
+                        *val = C::ZERO;
+                    }
                     positions.push(i);
-                    stack.push((0, Vec::new(), HashMap::new()));
+                    stack.push((0, false, Vec::new(), HashMap::new()));
                 }
                 ']' => {
                     if positions.len() == 0 {
@@ -101,41 +105,46 @@ impl<C: CellType> Program<C> {
                         });
                     }
                     positions.pop();
-                    let (offset, mut insts, vars) = stack.pop().unwrap();
-                    let mut vars = vars.into_iter().collect::<Vec<_>>();
+                    let (sub_offset, sub_moved, mut sub_insts, sub_buff) = stack.pop().unwrap();
+                    let mut vars = sub_buff.into_iter().collect::<Vec<_>>();
                     vars.sort();
                     for &(var, val) in &vars {
                         if val != C::ZERO {
-                            insts.push(Instr::Add(val, var));
+                            sub_insts.push(Instr::Add(val, var));
                         }
                     }
-                    let top = stack.last_mut().unwrap();
-                    if insts.len() == 1 && matches!(insts[0], Instr::Add(c, 0) if c.is_odd()) {
-                        top.1.push(Instr::Load(C::ZERO, top.0));
-                        top.2.remove(&top.0);
+                    let (off, moved, insts, buff) = stack.last_mut().unwrap();
+                    if sub_insts.len() == 1
+                        && matches!(sub_insts[0], Instr::Add(c, 0) if c.is_odd())
+                    {
+                        insts.push(Instr::Load(C::ZERO, *off));
+                        buff.insert(*off, C::ZERO);
                     } else {
                         let block_id = blocks.len();
-                        let block_id = *blocks.entry(Block(offset, insts)).or_insert(block_id);
-                        if offset == 0 {
+                        let block_id = *blocks
+                            .entry(Block(sub_offset, sub_insts))
+                            .or_insert(block_id);
+                        if sub_offset == 0 && !sub_moved {
                             for (var, _) in vars {
-                                if let Some(v) = top.2.get_mut(&(top.0 + var)) {
+                                if let Some(v) = buff.get_mut(&(*off + var)) {
                                     if *v != C::ZERO {
-                                        top.1.push(Instr::Add(*v, top.0 + var));
+                                        insts.push(Instr::Add(*v, *off + var));
                                         *v = C::ZERO;
                                     }
                                 }
                             }
                         } else {
-                            let mut vars = top.2.iter_mut().collect::<Vec<_>>();
+                            let mut vars = buff.iter_mut().collect::<Vec<_>>();
                             vars.sort();
                             for (var, val) in vars {
                                 if *val != C::ZERO {
-                                    top.1.push(Instr::Add(*val, *var));
+                                    insts.push(Instr::Add(*val, *var));
                                     *val = C::ZERO;
                                 }
                             }
+                            *moved = true;
                         }
-                        top.1.push(Instr::Loop(top.0, block_id));
+                        insts.push(Instr::Loop(*off, block_id));
                     }
                 }
                 _ => { /* comment */ }
@@ -147,7 +156,7 @@ impl<C: CellType> Program<C> {
                 position: *positions.last().unwrap(),
             });
         }
-        let (offset, mut insts, vars) = stack.pop().unwrap();
+        let (offset, _, mut insts, vars) = stack.pop().unwrap();
         let mut vars = vars.into_iter().collect::<Vec<_>>();
         vars.sort();
         for (var, val) in vars {
