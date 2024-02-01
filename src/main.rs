@@ -4,6 +4,7 @@ use std::{env, fs::File, io::Read, process::exit};
 
 use hpbf::{CellType, Context, Error, ErrorKind, Program};
 
+/// Print the CLI help text for this program to stdout.
 fn print_help_text() {
     println!(
         "Usage: {} [option].. [-f file].. [code]..",
@@ -24,6 +25,7 @@ fn print_help_text() {
     println!("   code             Execute the code given in the argument");
 }
 
+/// Print the given `error` for the given `code` to stderr.
 fn print_error(code: &str, error: Error) {
     match error.kind {
         ErrorKind::LoopNotClosed => {
@@ -44,6 +46,7 @@ fn print_error(code: &str, error: Error) {
     }
 }
 
+/// Fallback using the interpreter when the `llvm` feature is disabled.
 #[cfg(not(feature = "llvm"))]
 fn execute_in_context<C: CellType>(
     cxt: &mut Context<C>,
@@ -59,6 +62,9 @@ fn execute_in_context<C: CellType>(
     return false;
 }
 
+/// Execute a given program `prog` in the given context `cxt` using the JIT
+/// compiler. This function is replaced with the interpreter if the `llvm`
+/// feature is not enabled.
 #[cfg(feature = "llvm")]
 fn execute_in_context<C: CellType>(
     cxt: &mut Context<C>,
@@ -83,6 +89,9 @@ fn execute_in_context<C: CellType>(
     return false;
 }
 
+/// Parse, optimize, and execute the given code with the given optimization
+/// level and options. Alternatively, if `print_ir` is true, do not execute,
+/// but only print the final IR.
 fn execute_code<C: CellType>(
     code: String,
     no_opt: bool,
