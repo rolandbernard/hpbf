@@ -9,38 +9,35 @@ use std::{
 
 use crate::{Block, CellType, Instr, Program};
 
+/// Memory context for the Brainfuck program. This acts as an unbounded array of
+/// cells each containing an value of type `C` initialized to zero. The memory
+/// is bounds checked and will automatically grow in either direction.
+#[repr(C)]
+pub struct Memory<C: CellType> {
+    // Do not change the order or position of the these fields. They are
+    // used by the code generated in the jit compiler.
+    buffer: *mut C,
+    size: usize,
+    offset: usize,
+}
+
 /// Context for the Brainfuck execution environment.
 #[repr(C)]
 pub struct Context<'a, C: CellType> {
     // Do not change the order or position of the three first fields. They are
     // used by the code generated in the jit compiler.
-    memory: *mut C,
-    size: usize,
-    offset: usize,
+    pub memory: Memory<C>,
     input: Option<Box<dyn Read + 'a>>,
     output: Option<Box<dyn Write + 'a>>,
 }
 
-impl<'a, C: CellType> Context<'a, C> {
-    /// Create a new context for executing a Brainfuck program.
-    pub fn new(input: Option<Box<dyn Read + 'a>>, output: Option<Box<dyn Write + 'a>>) -> Self {
-        Context {
-            memory: ptr::null_mut(),
+impl<C: CellType> Memory<C> {
+    pub fn new() -> Self {
+        Memory {
+            buffer: ptr::null_mut(),
             size: 0,
             offset: 0,
-            input,
-            output,
         }
-    }
-
-    /// Create a new context that uses standard input and output.
-    pub fn with_stdio() -> Self {
-        Self::new(Some(Box::new(stdin())), Some(Box::new(stdout())))
-    }
-
-    /// Create a new context that does not have any input or output.
-    pub fn without_io() -> Self {
-        Self::new(None, None)
     }
 
     /// Move the current pointer. No memory will be allocated.
@@ -55,7 +52,7 @@ impl<'a, C: CellType> Context<'a, C> {
         let ptr = self.offset.wrapping_add_signed(offset);
         if ptr < self.size {
             // SAFETY: The area from `memory` can safely be accessed up to `size`.
-            unsafe { self.memory.add(ptr).read() }
+            unsafe { self.buffer.add(ptr).read() }
         } else {
             C::ZERO
         }
@@ -94,13 +91,13 @@ impl<'a, C: CellType> Context<'a, C> {
         if self.size != 0 {
             // SAFETY: If the old size is non-zero, the old region is valid.
             unsafe {
-                self.memory
+                self.buffer
                     .copy_to_nonoverlapping(new_buffer.wrapping_add(added_below), self.size);
                 let old_layout = Layout::array::<C>(self.size).unwrap();
-                dealloc(self.memory as *mut u8, old_layout);
+                dealloc(self.buffer as *mut u8, old_layout);
             }
         }
-        self.memory = new_buffer;
+        self.buffer = new_buffer;
         self.size = new_size;
         self.offset = self.offset.wrapping_add(added_below);
     }
@@ -110,7 +107,7 @@ impl<'a, C: CellType> Context<'a, C> {
         self.make_accessible(offset, offset + 1);
         let ptr = self.offset.wrapping_add_signed(offset);
         // SAFETY: `make_accessible` ensures that `ptr` can be written safely.
-        unsafe { self.memory.add(ptr).write(value) }
+        unsafe { self.buffer.add(ptr).write(value) }
     }
 
     /// Write to the given offset from the current pointer. If the currently
@@ -119,10 +116,31 @@ impl<'a, C: CellType> Context<'a, C> {
         let ptr = self.offset.wrapping_add_signed(offset);
         if ptr < self.size {
             // SAFETY: The area from `memory` can safely be accessed up to `size`.
-            unsafe { self.memory.add(ptr).write(value) }
+            unsafe { self.buffer.add(ptr).write(value) }
         } else {
             self.write_out_of_bounds(offset, value);
         }
+    }
+}
+
+impl<'a, C: CellType> Context<'a, C> {
+    /// Create a new context for executing a Brainfuck program.
+    pub fn new(input: Option<Box<dyn Read + 'a>>, output: Option<Box<dyn Write + 'a>>) -> Self {
+        Context {
+            memory: Memory::new(),
+            input,
+            output,
+        }
+    }
+
+    /// Create a new context that uses standard input and output.
+    pub fn with_stdio() -> Self {
+        Self::new(Some(Box::new(stdin())), Some(Box::new(stdout())))
+    }
+
+    /// Create a new context that does not have any input or output.
+    pub fn without_io() -> Self {
+        Self::new(None, None)
     }
 
     /// Input one byte from standard input.
@@ -158,39 +176,39 @@ impl<'a, C: CellType> Context<'a, C> {
         for instr in &block.insts {
             match *instr {
                 Instr::Output { src } => {
-                    self.output(self.read(src).into_u8());
+                    self.output(self.memory.read(src).into_u8());
                 }
                 Instr::Input { dst } => {
                     let val = C::from_u8(self.input());
-                    self.write(dst, val);
+                    self.memory.write(dst, val);
                 }
                 Instr::Load { val, dst } => {
-                    self.write(dst, val);
+                    self.memory.write(dst, val);
                 }
                 Instr::Add { val, dst } => {
-                    let val = val.wrapping_add(self.read(dst));
-                    self.write(dst, val);
+                    let val = val.wrapping_add(self.memory.read(dst));
+                    self.memory.write(dst, val);
                 }
                 Instr::MulAdd { val, src, dst } => {
                     let val = val
-                        .wrapping_mul(self.read(src))
-                        .wrapping_add(self.read(dst));
-                    self.write(dst, val);
+                        .wrapping_mul(self.memory.read(src))
+                        .wrapping_add(self.memory.read(dst));
+                    self.memory.write(dst, val);
                 }
                 Instr::Loop { cond, block } => {
                     let block = &program.blocks[block];
-                    while self.read(cond) != C::ZERO {
-                        self.mov(cond);
+                    while self.memory.read(cond) != C::ZERO {
+                        self.memory.mov(cond);
                         self.execute_block(program, block);
-                        self.mov(block.shift - cond);
+                        self.memory.mov(block.shift - cond);
                     }
                 }
                 Instr::If { cond, block } => {
-                    if self.read(cond) != C::ZERO {
-                        self.mov(cond);
+                    if self.memory.read(cond) != C::ZERO {
+                        self.memory.mov(cond);
                         let block = &program.blocks[block];
                         self.execute_block(program, block);
-                        self.mov(block.shift - cond);
+                        self.memory.mov(block.shift - cond);
                     }
                 }
             }
@@ -203,13 +221,13 @@ impl<'a, C: CellType> Context<'a, C> {
     }
 }
 
-impl<'a, C: CellType> Drop for Context<'a, C> {
+impl<C: CellType> Drop for Memory<C> {
     fn drop(&mut self) {
         if self.size != 0 {
             // SAFETY: If the old size is non-zero, the old region is valid.
             unsafe {
                 let old_layout = Layout::array::<C>(self.size).unwrap();
-                dealloc(self.memory as *mut u8, old_layout);
+                dealloc(self.buffer as *mut u8, old_layout);
             }
         }
     }
@@ -217,79 +235,79 @@ impl<'a, C: CellType> Drop for Context<'a, C> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Context, Error, Program};
+    use crate::{runtime::Memory, Context, Error, Program};
 
     #[test]
     fn reading_unused_cells_return_zero() {
-        let ctx = Context::<u8>::without_io();
-        assert_eq!(ctx.read(0), 0);
-        assert_eq!(ctx.read(1), 0);
-        assert_eq!(ctx.read(100), 0);
-        assert_eq!(ctx.read(-1), 0);
-        assert_eq!(ctx.read(-100), 0);
+        let mem = Memory::<u8>::new();
+        assert_eq!(mem.read(0), 0);
+        assert_eq!(mem.read(1), 0);
+        assert_eq!(mem.read(100), 0);
+        assert_eq!(mem.read(-1), 0);
+        assert_eq!(mem.read(-100), 0);
     }
 
     #[test]
     fn initial_cell_reads_written_value() {
-        let mut ctx = Context::<u8>::without_io();
-        ctx.write(0, 100);
-        assert_eq!(ctx.read(0), 100);
+        let mut mem = Memory::<u8>::new();
+        mem.write(0, 100);
+        assert_eq!(mem.read(0), 100);
     }
 
     #[test]
     fn positive_cell_reads_written_value() {
-        let mut ctx = Context::<u8>::without_io();
-        ctx.write(100, 42);
-        assert_eq!(ctx.read(100), 42);
+        let mut mem = Memory::<u8>::new();
+        mem.write(100, 42);
+        assert_eq!(mem.read(100), 42);
     }
 
     #[test]
     fn negative_cell_reads_written_value() {
-        let mut ctx = Context::<u8>::without_io();
-        ctx.write(-100, 42);
-        assert_eq!(ctx.read(-100), 42);
+        let mut mem = Memory::<u8>::new();
+        mem.write(-100, 42);
+        assert_eq!(mem.read(-100), 42);
     }
 
     #[test]
     fn resizes_preserve_pointer() {
-        let mut ctx = Context::<u8>::without_io();
-        ctx.write(-100, 1);
-        assert_eq!(ctx.read(-100), 1);
-        ctx.write(100, 2);
-        assert_eq!(ctx.read(-100), 1);
-        assert_eq!(ctx.read(100), 2);
-        ctx.write(-10000, 3);
-        assert_eq!(ctx.read(-100), 1);
-        assert_eq!(ctx.read(100), 2);
-        assert_eq!(ctx.read(-10000), 3);
-        ctx.write(10000, 4);
-        assert_eq!(ctx.read(-100), 1);
-        assert_eq!(ctx.read(100), 2);
-        assert_eq!(ctx.read(-10000), 3);
-        assert_eq!(ctx.read(10000), 4);
+        let mut mem = Memory::<u8>::new();
+        mem.write(-100, 1);
+        assert_eq!(mem.read(-100), 1);
+        mem.write(100, 2);
+        assert_eq!(mem.read(-100), 1);
+        assert_eq!(mem.read(100), 2);
+        mem.write(-10000, 3);
+        assert_eq!(mem.read(-100), 1);
+        assert_eq!(mem.read(100), 2);
+        assert_eq!(mem.read(-10000), 3);
+        mem.write(10000, 4);
+        assert_eq!(mem.read(-100), 1);
+        assert_eq!(mem.read(100), 2);
+        assert_eq!(mem.read(-10000), 3);
+        assert_eq!(mem.read(10000), 4);
     }
 
     #[test]
     fn pointer_movements_affect_read_and_write() {
-        let mut ctx = Context::<u8>::without_io();
-        ctx.mov(-100);
-        ctx.write(0, 1);
-        assert_eq!(ctx.read(0), 1);
-        ctx.mov(200);
-        ctx.write(0, 2);
-        assert_eq!(ctx.read(-200), 1);
-        assert_eq!(ctx.read(0), 2);
-        ctx.mov(-10100);
-        ctx.write(0, 3);
-        assert_eq!(ctx.read(9900), 1);
-        assert_eq!(ctx.read(10100), 2);
-        assert_eq!(ctx.read(0), 3);
-        ctx.mov(20000);
-        ctx.write(0, 4);
-        assert_eq!(ctx.read(-10100), 1);
-        assert_eq!(ctx.read(-9900), 2);
-        assert_eq!(ctx.read(-20000), 3);
-        assert_eq!(ctx.read(0), 4);
+        let mut mem = Memory::<u8>::new();
+        mem.mov(-100);
+        mem.write(0, 1);
+        assert_eq!(mem.read(0), 1);
+        mem.mov(200);
+        mem.write(0, 2);
+        assert_eq!(mem.read(-200), 1);
+        assert_eq!(mem.read(0), 2);
+        mem.mov(-10100);
+        mem.write(0, 3);
+        assert_eq!(mem.read(9900), 1);
+        assert_eq!(mem.read(10100), 2);
+        assert_eq!(mem.read(0), 3);
+        mem.mov(20000);
+        mem.write(0, 4);
+        assert_eq!(mem.read(-10100), 1);
+        assert_eq!(mem.read(-9900), 2);
+        assert_eq!(mem.read(-20000), 3);
+        assert_eq!(mem.read(0), 4);
     }
 
     #[test]
