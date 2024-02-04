@@ -1,18 +1,21 @@
 //! Contains parsing and optimizing transformations for a Brainfuck program.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    fmt::{self, Debug},
+};
 
 use crate::{CellType, Error, ErrorKind};
 
 /// Represents a complete Brainfuck program.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq)]
 pub struct Program<C: CellType> {
     pub entry: usize,
     pub blocks: Vec<Block<C>>,
 }
 
 /// Represents the inside of a loop.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Block<C: CellType> {
     pub shift: isize,
     pub insts: Vec<Instr<C>>,
@@ -21,7 +24,7 @@ pub struct Block<C: CellType> {
 /// This represents a Brainfuck instruction. It includes not only the basic
 /// Brainfuck instructions, but also some additional operations that are common
 /// in Brainfuck and help the backend to generate better code.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum Instr<C: CellType> {
     Output { src: isize },
     Input { dst: isize },
@@ -219,6 +222,64 @@ impl<C: CellType> Program<C> {
             program.blocks[idx] = block;
         }
         return Ok(program);
+    }
+}
+
+impl<C: CellType> Program<C> {
+    fn print_block(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        block_id: usize,
+        indent: usize,
+    ) -> fmt::Result {
+        let block = &self.blocks[block_id];
+        for instr in &block.insts {
+            match instr {
+                Instr::Output { src } => {
+                    writeln!(f, "{:indent$}output [{}]", "", src, indent = indent)?;
+                }
+                Instr::Input { dst } => {
+                    writeln!(f, "{:indent$}input [{}]", "", dst, indent = indent)?;
+                }
+                Instr::Load { val, dst } => {
+                    writeln!(f, "{:indent$}[{}] = {:?}", "", dst, val, indent = indent)?;
+                }
+                Instr::Add { val, dst } => {
+                    writeln!(f, "{:indent$}[{}] += {:?}", "", dst, val, indent = indent)?;
+                }
+                Instr::MulAdd { val, src, dst } => {
+                    writeln!(
+                        f,
+                        "{:indent$}[{}] += {:?} * [{}]",
+                        "",
+                        dst,
+                        val,
+                        src,
+                        indent = indent
+                    )?;
+                }
+                Instr::Loop { cond, block } => {
+                    writeln!(f, "{:indent$}loop [{}] [", "", cond, indent = indent)?;
+                    self.print_block(f, *block, indent + 2)?;
+                    writeln!(f, "{:indent$}]", "", indent = indent)?;
+                }
+                Instr::If { cond, block } => {
+                    writeln!(f, "{:indent$}if [{}] [", "", cond, indent = indent)?;
+                    self.print_block(f, *block, indent + 2)?;
+                    writeln!(f, "{:indent$}]", "", indent = indent)?;
+                }
+            }
+        }
+        if block.shift != 0 {
+            writeln!(f, "{:indent$}move {}", "", block.shift, indent = indent)?;
+        }
+        Ok(())
+    }
+}
+
+impl<C: CellType> Debug for Program<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.print_block(f, self.entry, 0)
     }
 }
 
