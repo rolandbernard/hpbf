@@ -199,12 +199,6 @@ impl<C: CellType> OptBlockAnalysis<C> {
         self.known_loads.insert(dst, val);
     }
 
-    fn reads(&self) -> Vec<isize> {
-        let mut vec = self.read.iter().copied().collect::<Vec<_>>();
-        vec.sort();
-        return vec;
-    }
-
     fn clobbered<'a>(&'a self) -> impl Iterator<Item = isize> + 'a {
         self.written
             .iter()
@@ -631,8 +625,8 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                                 sub_state.emit(sub_state.shift);
                             }
                         }
-                        // let reads = sub_state.reads();
-                        // let writes = sub_state.writes();
+                        let reads = sub_state.reads();
+                        let writes = sub_state.writes();
                         let pending_adds = sub_state.pending_adds();
                         let pending_loads = sub_state.pending_loads();
                         let can_eliminate = !sub_shift
@@ -692,16 +686,16 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                                 block: sub_block_id,
                             }];
                         }
-                        // if sub_shift {
+                        if sub_shift {
                             for var in state.pending() {
                                 state.emit(var);
                             }
-                        // } else if !can_eliminate {
-                        //     state.emit(cond);
-                        //     for var in reads {
-                        //         state.emit(cond + var);
-                        //     }
-                        // }
+                        } else if !can_eliminate {
+                            state.emit(cond);
+                            for var in reads {
+                                state.emit(cond + var);
+                            }
+                        }
                         for (var, val) in pending_adds {
                             if var == 0 {
                                 has_pending_cond = true;
@@ -721,16 +715,16 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                             }
                         }
                         state.insts.append(&mut new_insts);
-                        // if loop_analysis.visible_effect() {
-                        //     if sub_shift {
+                        if loop_analysis.visible_effect() {
+                            if sub_shift {
                                 state.mem.fallback = OptMemFallback::Constant(OptValue::Unknown);
                                 state.mem.cells.clear();
-                        //     } else if !can_eliminate {
-                        //         for var in writes {
-                        //             state.mem.set(cond + var, OptValue::Unknown);
-                        //         }
-                        //     }
-                        // }
+                            } else if !can_eliminate {
+                                for var in writes {
+                                    state.mem.set(cond + var, OptValue::Unknown);
+                                }
+                            }
+                        }
                         if loop_analysis.at_least_once() {
                             for (var, val) in pending_loads {
                                 state.load(cond + var - sub_block.shift, val);

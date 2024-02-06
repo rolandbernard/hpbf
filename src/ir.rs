@@ -1,4 +1,4 @@
-//! Contains parsing and optimizing transformations for a Brainfuck program.
+//! Contains parsing and some optimizing transformations for a Brainfuck program.
 
 use std::{
     collections::HashMap,

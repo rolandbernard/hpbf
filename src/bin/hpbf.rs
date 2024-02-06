@@ -13,7 +13,7 @@ fn print_help_text() {
     println!("Options:");
     println!("   -f,--file file   Read the code from the given file");
     println!("   --no-jit         Do not perform jit compilation");
-    println!("   --print-ir       Print ir code to stderr and do not execute");
+    println!("   --print-ir       Print ir code to stdout and do not execute");
     println!("   --no-opt         Do not apply any pre-llvm optimization");
     println!("   -O{{0|1|2|3|4}}    Apply different levels of optimization");
     println!("   -i8              Run the code using a cell size of 8 bit");
@@ -48,17 +48,8 @@ fn print_error(code: &str, error: Error) {
 
 /// Fallback using the interpreter when the `llvm` feature is disabled.
 #[cfg(not(feature = "llvm"))]
-fn execute_in_context<C: CellType>(
-    cxt: &mut Context<C>,
-    _opt: u32,
-    prog: Program<C>,
-    print_ir: bool,
-) -> bool {
-    if print_ir {
-        eprintln!("{:#?}", prog);
-    } else {
-        cxt.execute(&prog);
-    }
+fn execute_in_context<C: CellType>(cxt: &mut Context<C>, _opt: u32, prog: Program<C>) -> bool {
+    cxt.execute(&prog);
     return false;
 }
 
@@ -66,17 +57,8 @@ fn execute_in_context<C: CellType>(
 /// compiler. This function is replaced with the interpreter if the `llvm`
 /// feature is not enabled.
 #[cfg(feature = "llvm")]
-fn execute_in_context<C: CellType>(
-    cxt: &mut Context<C>,
-    opt: u32,
-    prog: Program<C>,
-    print_ir: bool,
-) -> bool {
-    if let Err(str) = if print_ir {
-        cxt.jit_print_module(opt, &prog)
-    } else {
-        cxt.jit_execute(opt, &prog)
-    } {
+fn execute_in_context<C: CellType>(cxt: &mut Context<C>, opt: u32, prog: Program<C>) -> bool {
+    if let Err(str) = cxt.jit_execute(opt, &prog) {
         print_error(
             &str,
             Error {
@@ -105,13 +87,13 @@ fn execute_code<C: CellType>(
             let mut cxt = Context::<C>::with_stdio();
             if no_jit {
                 if print_ir {
-                    eprintln!("{:#?}", prog);
+                    println!("{:#?}", prog);
                 } else {
                     cxt.execute(&prog);
                 }
                 return false;
             } else {
-                return execute_in_context(&mut cxt, opt, prog, print_ir);
+                return execute_in_context(&mut cxt, opt, prog);
             }
         }
         Err(error) => {

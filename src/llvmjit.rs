@@ -3,8 +3,8 @@
 use crate::{CellType, Context, Program};
 
 impl<'a, C: CellType> Context<'a, C> {
-    /// Print the JIT internal IR for the given `program` and optimization level
-    /// `opt` to stderr. Do not execute anything.
+    /// Print the LLVM IR for the given `program` and optimization level
+    /// `opt` to stdout. Do not execute anything.
     pub fn jit_print_module<'b>(
         &'b mut self,
         _opt: u32,

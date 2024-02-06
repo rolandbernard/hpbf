@@ -1,15 +1,15 @@
 //! Library for executing Brainfuck programs.
 
-mod ast;
+mod ir;
 mod opt;
 mod runtime;
 
 #[cfg(feature = "llvm")]
-mod codegen;
+mod llvmjit;
 
 use std::{fmt::Debug, hash::Hash};
 
-pub use ast::{Block, Instr, Program};
+pub use ir::{Block, Instr, Program};
 pub use runtime::Context;
 
 /// Kind of error that might be encountered during the parsing of a Brainfuck
