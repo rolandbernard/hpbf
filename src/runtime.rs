@@ -7,7 +7,7 @@ use std::{
     ptr,
 };
 
-use crate::{Block, CellType, Instr, Program};
+use crate::CellType;
 
 /// Memory context for the Brainfuck program. This acts as an unbounded array of
 /// cells each containing an value of type `C` initialized to zero. The memory
@@ -32,6 +32,7 @@ pub struct Context<'a, C: CellType> {
 }
 
 impl<C: CellType> Memory<C> {
+    /// Create a new memory. All values are initially set to `C::ZERO`.
     pub fn new() -> Self {
         Memory {
             buffer: ptr::null_mut(),
@@ -168,59 +169,6 @@ impl<'a, C: CellType> Context<'a, C> {
     }
 }
 
-impl<'a, C: CellType> Context<'a, C> {
-    /// Execute a single block within the given program. The block does not necessary
-    /// have to be part of the program, but all loops and ifs must refer to blocks
-    /// within the program.
-    fn execute_block(&mut self, program: &Program<C>, block: &Block<C>) {
-        for instr in &block.insts {
-            match *instr {
-                Instr::Output { src } => {
-                    self.output(self.memory.read(src).into_u8());
-                }
-                Instr::Input { dst } => {
-                    let val = C::from_u8(self.input());
-                    self.memory.write(dst, val);
-                }
-                Instr::Load { val, dst } => {
-                    self.memory.write(dst, val);
-                }
-                Instr::Add { val, dst } => {
-                    let val = val.wrapping_add(self.memory.read(dst));
-                    self.memory.write(dst, val);
-                }
-                Instr::MulAdd { val, src, dst } => {
-                    let val = val
-                        .wrapping_mul(self.memory.read(src))
-                        .wrapping_add(self.memory.read(dst));
-                    self.memory.write(dst, val);
-                }
-                Instr::Loop { cond, block } => {
-                    let block = &program.blocks[block];
-                    while self.memory.read(cond) != C::ZERO {
-                        self.memory.mov(cond);
-                        self.execute_block(program, block);
-                        self.memory.mov(block.shift - cond);
-                    }
-                }
-                Instr::If { cond, block } => {
-                    if self.memory.read(cond) != C::ZERO {
-                        self.memory.mov(cond);
-                        let block = &program.blocks[block];
-                        self.execute_block(program, block);
-                        self.memory.mov(block.shift - cond);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Interpreter based execution engine for Brainfuck.
-    pub fn execute(&mut self, program: &Program<C>) {
-        self.execute_block(program, &program.blocks[program.entry]);
-    }
-}
-
 impl<C: CellType> Drop for Memory<C> {
     fn drop(&mut self) {
         if self.size != 0 {
@@ -235,7 +183,7 @@ impl<C: CellType> Drop for Memory<C> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{runtime::Memory, Context, Error, Program};
+    use crate::{runtime::Memory, Context};
 
     #[test]
     fn reading_unused_cells_return_zero() {
@@ -328,117 +276,5 @@ mod tests {
         assert_eq!(ctx.input(), 42);
         assert_eq!(ctx.input(), 1);
         assert_eq!(ctx.input(), 3);
-    }
-
-    #[test]
-    fn simple_execution() -> Result<(), Error> {
-        let mut buf = Vec::new();
-        let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
-        ctx.execute(&Program::parse(
-            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
-            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
-        )?);
-        drop(ctx);
-        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
-        Ok(())
-    }
-
-    #[test]
-    fn simple_execution_u16() -> Result<(), Error> {
-        let mut buf = Vec::new();
-        let mut ctx = Context::<u16>::new(None, Some(Box::new(&mut buf)));
-        ctx.execute(&Program::parse(
-            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
-            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
-        )?);
-        drop(ctx);
-        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
-        Ok(())
-    }
-
-    #[test]
-    fn simple_execution_u32() -> Result<(), Error> {
-        let mut buf = Vec::new();
-        let mut ctx = Context::<u32>::new(None, Some(Box::new(&mut buf)));
-        ctx.execute(&Program::parse(
-            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
-            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
-        )?);
-        drop(ctx);
-        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
-        Ok(())
-    }
-
-    #[test]
-    fn simple_execution_u64() -> Result<(), Error> {
-        let mut buf = Vec::new();
-        let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
-        ctx.execute(&Program::parse(
-            ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
-            +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.",
-        )?);
-        drop(ctx);
-        assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
-        Ok(())
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore)]
-    fn test_program_access_distant_cell() -> Result<(), Error> {
-        let mut buf = Vec::new();
-        let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
-        ctx.execute(&Program::parse(
-            "++++[>++++++<-]>[>+++++>+++++++<<-]>>++++<[[>[[
-            >>+<<-]<]>>>-]>-[>+>+<<-]>]+++++[>+++++++<<++>-]>.<<.",
-        )?);
-        drop(ctx);
-        assert_eq!(String::from_utf8(buf).unwrap(), "#\n");
-        Ok(())
-    }
-
-    #[test]
-    fn test_program_output_h() -> Result<(), Error> {
-        let mut buf = Vec::new();
-        let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
-        ctx.execute(&Program::parse(
-            "[]++++++++++[>>+>+>++++++[<<+<+++>>>-]<<<<-]
-            \"A*$\";?@![#>>+<<]>[>>]<<<<[>++<[-]]>.>.",
-        )?);
-        drop(ctx);
-        assert_eq!(String::from_utf8(buf).unwrap(), "H\n");
-        Ok(())
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore)]
-    fn test_program_rot13() -> Result<(), Error> {
-        let mut buf = Vec::new();
-        let mut ctx = Context::<u8>::new(
-            Some(Box::new("~mlk zyx".as_bytes())),
-            Some(Box::new(&mut buf)),
-        );
-        ctx.execute(&Program::parse(
-            ",
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>++++++++++++++<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>>+++++[<----->-]<<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>++++++++++++++<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-
-            [>++++++++++++++<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>>+++++[<----->-]<<-
-            [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
-            [>++++++++++++++<-
-            [>+<-]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
-            ]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]>.[-]<,]",
-        )?);
-        drop(ctx);
-        assert_eq!(String::from_utf8(buf).unwrap(), "~zyx mlk");
-        Ok(())
     }
 }

@@ -7,7 +7,7 @@ edition = "2021"
 opt-level = 1
 
 [features]
-default = ["llvm"]
+default = []
 llvm = ["dep:inkwell"]
 
 [dependencies]

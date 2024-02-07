@@ -44,9 +44,7 @@ impl<C: CellType> Program<C> {
     /// ```
     /// # use hpbf::{Program, Block, Instr, Error};
     /// use Instr::*;
-    ///
     /// let prog = Program::<u8>::parse("+[-->-[>>+>-----<<]<--<---]>-.>>>+.>>..+++[.>]<<<<.+++.------.<<-.>>>>+.")?;
-    ///
     /// assert_eq!(prog,
     ///     Program {
     ///         entry: 3,
@@ -226,6 +224,8 @@ impl<C: CellType> Program<C> {
 }
 
 impl<C: CellType> Program<C> {
+    /// Pretty print the block with the given `block_id` and indented by `indent`
+    /// spaces into the formatter `f`. Referenced blocks are printed recursively.
     fn print_block(
         &self,
         f: &mut fmt::Formatter<'_>,

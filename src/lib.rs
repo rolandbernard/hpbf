@@ -1,16 +1,15 @@
 //! Library for executing Brainfuck programs.
 
+mod exec;
 mod ir;
 mod opt;
 mod runtime;
 
-#[cfg(feature = "llvm")]
-mod llvmjit;
-
 use std::{fmt::Debug, hash::Hash};
 
+pub use exec::{BaseInterpreter, Executor};
 pub use ir::{Block, Instr, Program};
-pub use runtime::Context;
+pub use runtime::{Context, Memory};
 
 /// Kind of error that might be encountered during the parsing of a Brainfuck
 /// program or other operations preventing execution.
@@ -89,9 +88,20 @@ pub trait CellType: Copy + Ord + Hash + Debug {
         return result;
     }
 
-    /// Compute the value `x` such that `x.wrapping_mul(other) == self`. It
-    /// should be noted that the semantics of this are very different from the
-    /// standard `wrapping_div` that Rust provides for integer types.
+    /// Compute the smallest value `x` such that `x.wrapping_mul(other) == self`.
+    /// It should be noted that the semantics of this are very different from
+    /// the standard `wrapping_div` that Rust provides for integer types.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hpbf::CellType;
+    /// assert_eq!(<u8 as CellType>::wrapping_div(5, 5), Some(1));
+    /// assert_eq!(<u8 as CellType>::wrapping_div(5, 1), Some(5));
+    /// assert_eq!(<u8 as CellType>::wrapping_div(5, 2), None);
+    /// assert_eq!(<u8 as CellType>::wrapping_div(8, 7), Some(184));
+    /// assert_eq!(<u8 as CellType>::wrapping_div(32, 4), Some(8));
+    /// assert_eq!(<u8 as CellType>::wrapping_div(32, 64), None);
+    /// ```
     fn wrapping_div(self, div: Self) -> Option<Self> {
         let shift = div.trailing_zeros();
         if self == Self::ZERO {
@@ -303,5 +313,53 @@ impl CellType for u64 {
 
     fn trailing_zeros(self) -> u32 {
         self.trailing_zeros()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::CellType;
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn wrapping_div_is_smallest() {
+        for div in 0..=255 {
+            let mut inv = HashMap::new();
+            for x in 0..=255 {
+                inv.entry(x.wrapping_mul(div)).or_insert(x);
+            }
+            for num in 0..=255 {
+                if let Some(x) = <u8 as CellType>::wrapping_div(num, div) {
+                    assert_eq!(x.wrapping_mul(div), num);
+                    assert_eq!(inv.get(&num), Some(&x));
+                } else {
+                    assert!(!inv.contains_key(&num));
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn wrapping_div_is_smallest_u16() {
+        for div in (0..=u16::MAX)
+            .step_by(7919)
+            .flat_map(|i| [i, i + 1].into_iter())
+        {
+            let mut inv = HashMap::new();
+            for x in 0..=u16::MAX {
+                inv.entry(x.wrapping_mul(div)).or_insert(x);
+            }
+            for num in 0..=u16::MAX {
+                if let Some(x) = <u16 as CellType>::wrapping_div(num, div) {
+                    assert_eq!(x.wrapping_mul(div), num);
+                    assert_eq!(inv.get(&num), Some(&x));
+                } else {
+                    assert!(!inv.contains_key(&num));
+                }
+            }
+        }
     }
 }

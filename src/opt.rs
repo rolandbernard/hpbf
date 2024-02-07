@@ -327,7 +327,7 @@ impl<'p, C: CellType> OptRebuildState<'p, C> {
             }
         }
     }
-    
+
     fn reads(&self) -> Vec<isize> {
         let mut vec = self.read.iter().copied().collect::<Vec<_>>();
         vec.sort();
@@ -585,13 +585,15 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                         let sub_block = &self.original.blocks[block];
                         let analysis = &self.analysis[block];
                         let mut sub_state = OptRebuildState::new(OptMemFallback::Parent {
-                                    offset: cond,
-                                    parent: &state.mem,
-                                });
+                            offset: cond,
+                            parent: &state.mem,
+                        });
                         if !loop_analysis.at_most_once() {
-                            if !loop_analysis.at_most_once() && (analysis.shift || sub_block.shift != 0)
+                            if !loop_analysis.at_most_once()
+                                && (analysis.shift || sub_block.shift != 0)
                             {
-                                sub_state.mem.fallback = OptMemFallback::Constant(OptValue::Unknown);
+                                sub_state.mem.fallback =
+                                    OptMemFallback::Constant(OptValue::Unknown);
                             } else {
                                 for var in analysis.clobbered() {
                                     sub_state.mem.set(var, OptValue::Unknown);
@@ -629,9 +631,8 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                         let writes = sub_state.writes();
                         let pending_adds = sub_state.pending_adds();
                         let pending_loads = sub_state.pending_loads();
-                        let can_eliminate = !sub_shift
-                            && sub_state.insts.is_empty()
-                            && loop_analysis.finite();
+                        let can_eliminate =
+                            !sub_shift && sub_state.insts.is_empty() && loop_analysis.finite();
                         let needs_if = loop_analysis.at_most_once()
                             || (!loop_analysis.at_least_once() && !pending_loads.is_empty());
                         let mut new_insts = Vec::new();
@@ -677,7 +678,11 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                             let sub_block_id = *self
                                 .blocks
                                 .entry(Block {
-                                    shift: if loop_analysis.at_most_once() { sub_state.shift } else { 0 },
+                                    shift: if loop_analysis.at_most_once() {
+                                        sub_state.shift
+                                    } else {
+                                        0
+                                    },
                                     insts: new_insts,
                                 })
                                 .or_insert(sub_block_id);
