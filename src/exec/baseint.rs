@@ -84,7 +84,7 @@ impl<'p, C: CellType> Executor<'p, C> for BaseInterpreter<C> {
         Ok(BaseInterpreter { program })
     }
 
-    fn execute(&self, context: &mut Context<C>) -> Result<(), Error> {
+    fn execute(&self, context: &mut Context<C>) -> Result<(), Error<'p>> {
         Ok(self.execute_block(context, &self.program.blocks[self.program.entry]))
     }
 }

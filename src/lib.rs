@@ -7,7 +7,7 @@ mod runtime;
 
 use std::{fmt::Debug, hash::Hash};
 
-pub use exec::{BaseInterpreter, Executor};
+pub use exec::{BaseInterpreter, Executor, InplaceInterpreter};
 pub use ir::{Block, Instr, Program};
 pub use runtime::{Context, Memory};
 
@@ -25,8 +25,9 @@ pub enum ErrorKind {
 /// Error that might be encountered during the parsing of a Brainfuck program.
 /// Contains the index of the character that caused the error.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub struct Error {
+pub struct Error<'str> {
     pub kind: ErrorKind,
+    pub str: &'str str,
     pub position: usize,
 }
 

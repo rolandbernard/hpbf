@@ -5,7 +5,7 @@ macro_rules! executor_tests {
             use crate::{$i, Context, Error, Executor};
 
             #[test]
-            fn simple_execution() -> Result<(), Error> {
+            fn simple_execution() -> Result<(), Error<'static>> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
                 let code = ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
@@ -18,7 +18,7 @@ macro_rules! executor_tests {
             }
 
             #[test]
-            fn simple_execution_u16() -> Result<(), Error> {
+            fn simple_execution_u16() -> Result<(), Error<'static>> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u16>::new(None, Some(Box::new(&mut buf)));
                 let code = ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
@@ -31,7 +31,7 @@ macro_rules! executor_tests {
             }
 
             #[test]
-            fn simple_execution_u32() -> Result<(), Error> {
+            fn simple_execution_u32() -> Result<(), Error<'static>> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u32>::new(None, Some(Box::new(&mut buf)));
                 let code = ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
@@ -44,7 +44,7 @@ macro_rules! executor_tests {
             }
 
             #[test]
-            fn simple_execution_u64() -> Result<(), Error> {
+            fn simple_execution_u64() -> Result<(), Error<'static>> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
                 let code = ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
@@ -58,7 +58,7 @@ macro_rules! executor_tests {
 
             #[test]
             #[cfg_attr(miri, ignore)]
-            fn test_program_access_distant_cell() -> Result<(), Error> {
+            fn test_program_access_distant_cell() -> Result<(), Error<'static>> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
                 let code = "++++[>++++++<-]>[>+++++>+++++++<<-]>>++++<[[>[[
@@ -71,7 +71,7 @@ macro_rules! executor_tests {
             }
 
             #[test]
-            fn test_program_output_h() -> Result<(), Error> {
+            fn test_program_output_h() -> Result<(), Error<'static>> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
                 let code = "[]++++++++++[>>+>+>++++++[<<+<+++>>>-]<<<<-]
@@ -85,7 +85,7 @@ macro_rules! executor_tests {
 
             #[test]
             #[cfg_attr(miri, ignore)]
-            fn test_program_rot13() -> Result<(), Error> {
+            fn test_program_rot13() -> Result<(), Error<'static>> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u8>::new(
                     Some(Box::new("~mlk zyx".as_bytes())),

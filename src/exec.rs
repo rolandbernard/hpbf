@@ -4,8 +4,10 @@ use crate::{CellType, Context, Error};
 mod testdef;
 
 mod baseint;
+mod inplace;
 
 pub use baseint::BaseInterpreter;
+pub use inplace::InplaceInterpreter;
 
 /// Trait implemented by the different execution strategies provided by this crate.
 pub trait Executor<'p, C: CellType>: Sized {
@@ -13,8 +15,8 @@ pub trait Executor<'p, C: CellType>: Sized {
     /// code may be captured or used to create other internal representations.
     /// If the executor supports optimizations, they should be influenced by the
     /// `no_opt` and `opt` parameters to this method.
-    fn create(code: &'p str, no_opt: bool, opt: u32) -> Result<Self, Error>;
+    fn create(code: &'p str, no_opt: bool, opt: u32) -> Result<Self, Error<'p>>;
 
     /// Execute the executor in the given [`Context`].
-    fn execute(&self, context: &mut Context<C>) -> Result<(), Error>;
+    fn execute(&self, context: &mut Context<C>) -> Result<(), Error<'p>>;
 }

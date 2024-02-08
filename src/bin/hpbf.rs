@@ -2,7 +2,12 @@
 
 use std::{env, fs::File, io::Read, process::exit};
 
-use hpbf::{BaseInterpreter, CellType, Context, Error, ErrorKind, Executor};
+use hpbf::{BaseInterpreter, CellType, Context, Error, ErrorKind, Executor, InplaceInterpreter};
+
+enum ExecutorKind {
+    Inplace,
+    BaseInt,
+}
 
 /// Print the CLI help text for this program to stdout.
 fn print_help_text() {
@@ -13,6 +18,8 @@ fn print_help_text() {
     println!("Options:");
     println!("   -f,--file file   Read the code from the given file");
     println!("   --print-ir       Print ir code to stdout and do not execute");
+    println!("   --inplace        Use the inplace non-optimizing interpreter");
+    println!("   --base-int       Use the baseline slightly optimizing interpreter");
     println!("   --no-opt         Apply only the minimum optimizations required");
     println!("   -O{{0|1|2|3|4}}    Apply different levels of optimization");
     println!("   -i8              Run the code using a cell size of 8 bit");
@@ -25,7 +32,7 @@ fn print_help_text() {
 }
 
 /// Print the given `error` for the given `code` to stderr.
-fn print_error(code: &str, error: Error) {
+fn print_error(error: Error) {
     match error.kind {
         ErrorKind::LoopNotClosed => {
             eprintln!("error: unbalances brackets, loop not closed");
@@ -34,13 +41,13 @@ fn print_error(code: &str, error: Error) {
             eprintln!("error: unbalanced brackets, loop not opened");
         }
         ErrorKind::FileReadFailed => {
-            eprintln!("error: failed to open file `{code}`");
+            eprintln!("error: failed to open file `{}`", error.str);
         }
         ErrorKind::FileEncodingError => {
-            eprintln!("error: failed to read file `{code}`");
+            eprintln!("error: failed to read file `{}`", error.str);
         }
         ErrorKind::LlvmError => {
-            eprintln!("error: llvm error: {code}");
+            eprintln!("error: llvm error: {}", error.str);
         }
     }
 }
@@ -50,17 +57,26 @@ fn print_error(code: &str, error: Error) {
 /// but only print the final IR.
 fn execute_code<C: CellType>(
     code: &str,
+    print_ir: bool,
+    kind: ExecutorKind,
     no_opt: bool,
     opt: u32,
-    print_ir: bool,
 ) -> Result<(), Error> {
     if print_ir {
         let exec = BaseInterpreter::<C>::create(code, no_opt, opt)?;
         exec.print_ir();
     } else {
         let mut cxt = Context::<C>::with_stdio();
-        let exec = BaseInterpreter::<C>::create(code, no_opt, opt)?;
-        exec.execute(&mut cxt)?;
+        match kind {
+            ExecutorKind::Inplace => {
+                let exec = InplaceInterpreter::<C>::create(code, no_opt, opt)?;
+                exec.execute(&mut cxt)?;
+            }
+            ExecutorKind::BaseInt => {
+                let exec = BaseInterpreter::<C>::create(code, no_opt, opt)?;
+                exec.execute(&mut cxt)?;
+            }
+        }
     }
     Ok(())
 }
@@ -69,6 +85,7 @@ fn main() {
     let mut bits = 8;
     let mut print_help = false;
     let mut print_ir = false;
+    let mut kind = ExecutorKind::BaseInt;
     let mut no_opt = false;
     let mut opt = 1;
     let mut has_error = false;
@@ -80,30 +97,28 @@ fn main() {
             match File::open(&arg) {
                 Ok(mut file) => {
                     if let Err(_) = file.read_to_string(&mut code) {
-                        print_error(
-                            &arg,
-                            Error {
-                                kind: ErrorKind::FileEncodingError,
-                                position: 0,
-                            },
-                        );
+                        print_error(Error {
+                            kind: ErrorKind::FileEncodingError,
+                            str: &arg,
+                            position: 0,
+                        });
                         has_error = true;
                     }
                 }
                 Err(_) => {
-                    print_error(
-                        &arg,
-                        Error {
-                            kind: ErrorKind::FileReadFailed,
-                            position: 0,
-                        },
-                    );
+                    print_error(Error {
+                        kind: ErrorKind::FileReadFailed,
+                        str: &arg,
+                        position: 0,
+                    });
                     has_error = true;
                 }
             }
         } else {
             match arg.as_str() {
                 "--print-ir" => print_ir = true,
+                "--inplace" => kind = ExecutorKind::Inplace,
+                "--base-int" => kind = ExecutorKind::BaseInt,
                 "--no-opt" => no_opt = true,
                 "-O0" => opt = 0,
                 "-O1" => opt = 1,
@@ -124,13 +139,13 @@ fn main() {
         print_help_text();
     } else if !has_error {
         if let Err(error) = match bits {
-            8 => execute_code::<u8>(&code, no_opt, opt, print_ir),
-            16 => execute_code::<u16>(&code, no_opt, opt, print_ir),
-            32 => execute_code::<u32>(&code, no_opt, opt, print_ir),
-            64 => execute_code::<u64>(&code, no_opt, opt, print_ir),
+            8 => execute_code::<u8>(&code, print_ir, kind, no_opt, opt),
+            16 => execute_code::<u16>(&code, print_ir, kind, no_opt, opt),
+            32 => execute_code::<u32>(&code, print_ir, kind, no_opt, opt),
+            64 => execute_code::<u64>(&code, print_ir, kind, no_opt, opt),
             _ => panic!("unsupported cell size"),
         } {
-            print_error(&code, error);
+            print_error(error);
             has_error = true;
         }
     }

@@ -74,11 +74,11 @@ impl<C: CellType> Program<C> {
     /// );
     /// # Ok::<(), Error>(())
     /// ```
-    pub fn parse(program: impl AsRef<str>) -> Result<Self, Error> {
+    pub fn parse<'str>(program: &'str str) -> Result<Self, Error<'str>> {
         let mut blocks = HashMap::new();
         let mut stack = vec![(0, false, Vec::new(), HashMap::new())];
         let mut positions = vec![];
-        for (i, char) in program.as_ref().chars().enumerate() {
+        for (i, char) in program.chars().enumerate() {
             let (shift, _, insts, buff) = stack.last_mut().unwrap();
             match char {
                 '>' => {
@@ -118,6 +118,7 @@ impl<C: CellType> Program<C> {
                     if positions.len() == 0 {
                         return Err(Error {
                             kind: ErrorKind::LoopNotOpened,
+                            str: program,
                             position: i,
                         });
                     }
@@ -193,6 +194,7 @@ impl<C: CellType> Program<C> {
         if stack.len() != 1 {
             return Err(Error {
                 kind: ErrorKind::LoopNotClosed,
+                str: program,
                 position: *positions.last().unwrap(),
             });
         }
@@ -289,7 +291,7 @@ mod tests {
     use Instr::*;
 
     #[test]
-    fn parsing_valid_brainfuck_returns_block() -> Result<(), Error> {
+    fn parsing_valid_brainfuck_returns_block() -> Result<(), Error<'static>> {
         let prog = Program::<u8>::parse("+++++[>[-],.<--]")?;
         assert_eq!(
             prog,
@@ -317,11 +319,13 @@ mod tests {
 
     #[test]
     fn parsing_with_missing_closing_returns_error() {
-        let prog = Program::<u8>::parse("+++++[>[-],.<--");
+        let code = "+++++[>[-],.<--";
+        let prog = Program::<u8>::parse(code);
         assert_eq!(
             prog,
             Err(Error {
                 kind: ErrorKind::LoopNotClosed,
+                str: code,
                 position: 5
             })
         );
@@ -329,11 +333,13 @@ mod tests {
 
     #[test]
     fn parsing_with_missing_opening_return_error() {
-        let prog = Program::<u8>::parse("+++++>[-],.<]--");
+        let code = "+++++>[-],.<]--";
+        let prog = Program::<u8>::parse(code);
         assert_eq!(
             prog,
             Err(Error {
                 kind: ErrorKind::LoopNotOpened,
+                str: code,
                 position: 12
             })
         );
