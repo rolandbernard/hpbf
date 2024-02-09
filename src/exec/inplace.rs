@@ -56,11 +56,16 @@ impl<'code, C: CellType> Executor<'code, C> for InplaceInterpreter<'code, C> {
                         .write(0, context.memory.read(0).wrapping_add(C::NEG_ONE));
                 }
                 b'.' => {
-                    context.output(context.memory.read(0).into_u8());
+                    if let Err(_) = context.output(context.memory.read(0).into_u8()) {
+                        return Ok(());
+                    }
                 }
                 b',' => {
-                    let val = context.input();
-                    context.memory.write(0, C::from_u8(val));
+                    if let Ok(val) = context.input() {
+                        context.memory.write(0, C::from_u8(val));
+                    } else {
+                        return Ok(());
+                    }
                 }
                 b'[' => {
                     if context.memory.read(0) == C::ZERO {

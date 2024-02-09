@@ -29,14 +29,14 @@ impl<C: CellType> BaseInterpreter<C> {
     /// Execute a single block within the given program. The block does not necessary
     /// have to be part of the program, but all loops and ifs must refer to blocks
     /// within the program.
-    fn execute_block(&self, cxt: &mut Context<C>, block: &Block<C>) {
+    fn execute_block(&self, cxt: &mut Context<C>, block: &Block<C>) -> Result<(), ()> {
         for instr in &block.insts {
             match *instr {
                 Instr::Output { src } => {
-                    cxt.output(cxt.memory.read(src).into_u8());
+                    cxt.output(cxt.memory.read(src).into_u8())?;
                 }
                 Instr::Input { dst } => {
-                    let val = C::from_u8(cxt.input());
+                    let val = C::from_u8(cxt.input()?);
                     cxt.memory.write(dst, val);
                 }
                 Instr::Load { val, dst } => {
@@ -56,7 +56,7 @@ impl<C: CellType> BaseInterpreter<C> {
                     let block = &self.program.blocks[block];
                     while cxt.memory.read(cond) != C::ZERO {
                         cxt.memory.mov(cond);
-                        self.execute_block(cxt, block);
+                        self.execute_block(cxt, block)?;
                         cxt.memory.mov(block.shift - cond);
                     }
                 }
@@ -64,12 +64,13 @@ impl<C: CellType> BaseInterpreter<C> {
                     if cxt.memory.read(cond) != C::ZERO {
                         cxt.memory.mov(cond);
                         let block = &self.program.blocks[block];
-                        self.execute_block(cxt, block);
+                        self.execute_block(cxt, block)?;
                         cxt.memory.mov(block.shift - cond);
                     }
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -85,7 +86,9 @@ impl<'p, C: CellType> Executor<'p, C> for BaseInterpreter<C> {
     }
 
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error<'p>> {
-        Ok(self.execute_block(context, &self.program.blocks[self.program.entry]))
+        self.execute_block(context, &self.program.blocks[self.program.entry])
+            .ok();
+        Ok(())
     }
 }
 

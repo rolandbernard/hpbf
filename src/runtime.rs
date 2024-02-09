@@ -3,7 +3,6 @@
 use std::{
     alloc::{alloc_zeroed, dealloc, Layout},
     io::{stdin, stdout, Read, Write},
-    process::exit,
     ptr,
 };
 
@@ -146,25 +145,27 @@ impl<'a, C: CellType> Context<'a, C> {
 
     /// Input one byte from standard input.
     #[cold]
-    pub fn input(&mut self) -> u8 {
-        let mut result = [0];
+    pub fn input(&mut self) -> Result<u8, ()> {
         if let Some(input) = &mut self.input {
-            if input.read(&mut result).is_err() {
-                exit(1);
-            }
+            let mut result = [0];
+            input.read(&mut result).map_err(|_| ())?;
+            Ok(result[0])
+        } else {
+            Err(())
         }
-        result[0]
     }
 
     /// Output one byte to standard output.
     #[cold]
-    pub fn output(&mut self, value: u8) {
+    pub fn output(&mut self, value: u8) -> Result<(), ()> {
         if let Some(output) = &mut self.output {
             match output.write(&[value]) {
-                Ok(0) => exit(0),
-                Err(_) => exit(1),
-                _ => { /* Everything is ok. */ }
+                Ok(0) => Err(()),
+                Err(_) => Err(()),
+                _ => Ok(()),
             }
+        } else {
+            Ok(())
         }
     }
 }
@@ -262,9 +263,9 @@ mod tests {
     fn output_writes_to_output() {
         let mut buf = Vec::new();
         let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
-        ctx.output(42);
-        ctx.output(1);
-        ctx.output(3);
+        ctx.output(42).unwrap();
+        ctx.output(1).unwrap();
+        ctx.output(3).unwrap();
         drop(ctx);
         assert_eq!(&buf, &[42, 1, 3]);
     }
@@ -273,8 +274,8 @@ mod tests {
     fn input_reads_from_input() {
         let buf = vec![42, 1, 3];
         let mut ctx = Context::<u8>::new(Some(Box::new(buf.as_slice())), None);
-        assert_eq!(ctx.input(), 42);
-        assert_eq!(ctx.input(), 1);
-        assert_eq!(ctx.input(), 3);
+        assert_eq!(ctx.input(), Ok(42));
+        assert_eq!(ctx.input(), Ok(1));
+        assert_eq!(ctx.input(), Ok(3));
     }
 }
