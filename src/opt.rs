@@ -26,6 +26,7 @@ struct OptRebuildState<'p, C: CellType> {
     mem: OptMemory<'p, C>,
     shift: isize,
     sub_shift: bool,
+    no_return: bool,
     insts: Vec<Instr<C>>,
     read: HashSet<isize>,
     written: HashSet<isize>,
@@ -104,6 +105,13 @@ impl<C: CellType> OptLoop<C> {
     fn never(&self) -> bool {
         match self {
             OptLoop::NTimes(c) if *c == C::ZERO => true,
+            _ => false,
+        }
+    }
+
+    fn infinite(&self) -> bool {
+        match self {
+            OptLoop::Infinite => true,
             _ => false,
         }
     }
@@ -199,10 +207,19 @@ impl<C: CellType> OptBlockAnalysis<C> {
         self.known_loads.insert(dst, val);
     }
 
-    fn clobbered<'a>(&'a self) -> impl Iterator<Item = isize> + 'a {
+    fn clobbered<'a>(
+        &'a self,
+        off: isize,
+        state: &'a OptRebuildState<C>,
+    ) -> impl Iterator<Item = isize> + 'a {
         self.written
             .iter()
-            .chain(self.known_loads.keys())
+            .chain(
+                self.known_loads
+                    .iter()
+                    .filter(move |(k, v)| state.get(off + **k) != OptValue::Known(**v))
+                    .map(|(k, _)| k),
+            )
             .chain(self.known_adds.keys())
             .copied()
     }
@@ -217,6 +234,7 @@ impl<'p, C: CellType> OptRebuildState<'p, C> {
             },
             shift: 0,
             sub_shift: false,
+            no_return: false,
             insts: Vec::new(),
             read: HashSet::new(),
             written: HashSet::new(),
@@ -467,6 +485,8 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                 } else {
                     OptLoop::Infinite
                 }
+            } else if !analysis.written.contains(&block.shift) {
+                OptLoop::Infinite
             } else {
                 OptLoop::AtLeastOnce
             }
@@ -578,9 +598,13 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                     let cond = cond + state.shift;
                     let loop_analysis = self.analyze_loop_in(cond, &state, block, is_loop);
                     if loop_analysis.at_least_once() && loop_analysis.at_most_once() {
-                        state.shift += cond;
+                        let extra_shift = cond - state.shift;
+                        state.shift += extra_shift;
                         self.rebuild_block(block, state);
-                        state.shift -= cond;
+                        if state.no_return {
+                            return;
+                        }
+                        state.shift -= extra_shift;
                     } else if !loop_analysis.never() {
                         let sub_block = &self.original.blocks[block];
                         let analysis = &self.analysis[block];
@@ -595,7 +619,7 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                                 sub_state.mem.fallback =
                                     OptMemFallback::Constant(OptValue::Unknown);
                             } else {
-                                for var in analysis.clobbered() {
+                                for var in analysis.clobbered(cond, &state) {
                                     sub_state.mem.set(var, OptValue::Unknown);
                                 }
                             }
@@ -604,16 +628,21 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                             sub_state.mem.set(0, OptValue::KnownNonZero);
                         }
                         self.rebuild_block(block, &mut sub_state);
+                        let no_sub_return = sub_state.no_return;
+                        let no_return = loop_analysis.infinite()
+                            || (no_sub_return && loop_analysis.at_least_once());
+                        let no_effect =
+                            !loop_analysis.visible_effect() || no_return || no_sub_return;
                         let sub_shift = sub_state.shift != 0 || sub_state.sub_shift;
-                        if sub_shift {
+                        if !no_effect && sub_shift {
                             state.sub_shift = true;
                         }
-                        if !loop_analysis.simple() {
+                        if !no_effect && !loop_analysis.simple() {
                             for (var, _) in sub_state.pending_adds() {
                                 sub_state.emit(var);
                             }
                         }
-                        if !loop_analysis.at_most_once() {
+                        if !no_sub_return && !loop_analysis.at_most_once() {
                             if sub_shift {
                                 for var in sub_state.pending() {
                                     sub_state.emit(var);
@@ -634,7 +663,7 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                         let can_eliminate =
                             !sub_shift && sub_state.insts.is_empty() && loop_analysis.finite();
                         let needs_if = loop_analysis.at_most_once()
-                            || (!loop_analysis.at_least_once() && !pending_loads.is_empty());
+                            || (!no_effect && !pending_loads.is_empty());
                         let mut new_insts = Vec::new();
                         if loop_analysis.at_most_once() {
                             new_insts.append(&mut sub_state.insts);
@@ -653,7 +682,7 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                             });
                         }
                         let mut has_pending_cond = false;
-                        if !loop_analysis.at_least_once() {
+                        if !no_effect && !loop_analysis.at_least_once() {
                             for &(var, val) in &pending_loads {
                                 if var == 0 {
                                     has_pending_cond = true;
@@ -701,26 +730,29 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                                 state.emit(cond + var);
                             }
                         }
-                        for (var, val) in pending_adds {
-                            if var == 0 {
-                                has_pending_cond = true;
-                            } else {
-                                match loop_analysis {
-                                    OptLoop::Simple | OptLoop::SimpleAtLeastOnce => {
-                                        state.muladd(cond + var, cond, val);
+                        state.insts.append(&mut new_insts);
+                        if no_return {
+                            state.no_return = true;
+                            return;
+                        } else if !no_effect {
+                            for (var, val) in pending_adds {
+                                if var == 0 {
+                                    has_pending_cond = true;
+                                } else {
+                                    match loop_analysis {
+                                        OptLoop::Simple | OptLoop::SimpleAtLeastOnce => {
+                                            state.muladd(cond + var, cond, val);
+                                        }
+                                        OptLoop::SimpleNeg | OptLoop::SimpleNegAtLeastOnce => {
+                                            state.muladd(cond + var, cond, val.wrapping_neg());
+                                        }
+                                        OptLoop::NTimes(n) => {
+                                            state.add(cond + var, n.wrapping_mul(val));
+                                        }
+                                        _ => unreachable!(),
                                     }
-                                    OptLoop::SimpleNeg | OptLoop::SimpleNegAtLeastOnce => {
-                                        state.muladd(cond + var, cond, val.wrapping_neg());
-                                    }
-                                    OptLoop::NTimes(n) => {
-                                        state.add(cond + var, n.wrapping_mul(val));
-                                    }
-                                    _ => unreachable!(),
                                 }
                             }
-                        }
-                        state.insts.append(&mut new_insts);
-                        if loop_analysis.visible_effect() {
                             if sub_shift {
                                 state.mem.fallback = OptMemFallback::Constant(OptValue::Unknown);
                                 state.mem.cells.clear();
