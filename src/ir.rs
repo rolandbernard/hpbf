@@ -148,19 +148,17 @@ impl<C: CellType> Program<C> {
                                 insts: sub_insts,
                             })
                             .or_insert(block_id);
-                        if sub_shift == 0 && !sub_moved {
-                            for (var, _) in vars {
-                                if let Some(v) = buff.get_mut(&(*shift + var)) {
-                                    if *v != C::ZERO {
-                                        insts.push(Instr::Add {
-                                            val: *v,
-                                            dst: *shift + var,
-                                        });
-                                        *v = C::ZERO;
-                                    }
-                                }
+                        for (var, _) in vars {
+                            let v = buff.entry(*shift + var).or_insert(C::ZERO);
+                            if *v != C::ZERO {
+                                insts.push(Instr::Add {
+                                    val: *v,
+                                    dst: *shift + var,
+                                });
+                                *v = C::ZERO;
                             }
-                        } else {
+                        }
+                        if sub_moved || sub_shift != 0 {
                             let mut vars = buff.iter_mut().collect::<Vec<_>>();
                             vars.sort();
                             for (var, val) in vars {
