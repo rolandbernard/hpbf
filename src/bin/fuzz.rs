@@ -1,5 +1,5 @@
 use std::{
-    collections::hash_map::RandomState,
+    collections::{hash_map::RandomState, HashMap, HashSet},
     env, fs,
     hash::{BuildHasher, Hasher},
     path::Path,
@@ -8,51 +8,145 @@ use std::{
 
 use hpbf::{BaseInterpreter, CellType, Context, Executor, InplaceInterpreter};
 
+/// State used to track variable information during the code generation for the
+/// fuzzing. This is required to ensure that every loop is either finite or performs
+/// some kind of output.
+struct GenState {
+    shift: isize,
+    sub_shift: bool,
+    has_out: bool,
+    initial_cond: Option<u64>,
+    written: HashSet<isize>,
+    known_loads: HashMap<isize, u64>,
+    known_adds: HashMap<isize, u64>,
+}
+
+impl GenState {
+    /// Create a new state with initial values.
+    fn new(initial_cond: Option<u64>) -> Self {
+        GenState {
+            shift: 0,
+            sub_shift: false,
+            has_out: false,
+            initial_cond,
+            written: HashSet::new(),
+            known_loads: HashMap::new(),
+            known_adds: HashMap::new(),
+        }
+    }
+
+    /// Return true if the loop is guaranteed to run a finite number of times.
+    /// Note that this by itself does not guarantee that the loop will ever
+    /// complete, e.g. if a contained loop is not finite.
+    fn finite(&self) -> bool {
+        if self.initial_cond == Some(0) {
+            true
+        } else if let Some(v) = self.known_loads.get(&self.shift) {
+            *v == 0
+        } else if self.sub_shift || self.shift != 0 {
+            false
+        } else if let Some(v) = self.known_adds.get(&0) {
+            v.is_odd()
+        } else {
+            false
+        }
+    }
+}
+
 /// Generate a random Brainfuck program. The program is guaranteed to be syntactically
-/// valid and additionally contains at least one output instruction per loop.
+/// valid and additionally guarantees that loops are either finite or print some output.
 fn generate_code(hasher: &mut impl Hasher, max_len: usize) -> String {
     let mut str = String::new();
-    let mut missing_outs = 0;
-    let mut stack = Vec::new();
-    while str.len() + stack.len() + missing_outs < max_len {
+    let mut stack = vec![GenState::new(Some(0))];
+    while str.len() + 2 * (stack.len() - 1) < max_len {
         hasher.write_usize(str.len());
+        let state = stack.last_mut().unwrap();
         match hasher.finish() % 8 {
-            0 => str.push('+'),
-            1 => str.push('-'),
-            2 => str.push('<'),
-            3 => str.push('>'),
-            4 => str.push(','),
-            5 => {
-                str.push('.');
-                if let Some(v) = stack.last_mut() {
-                    if *v {
-                        missing_outs -= 1;
-                    }
-                    *v = false;
+            0 => {
+                str.push('+');
+                if let Some(v) = state.known_loads.get_mut(&state.shift) {
+                    *v = v.wrapping_add(1);
+                } else if !state.written.contains(&state.shift) {
+                    let v = state.known_adds.entry(state.shift).or_insert(0);
+                    *v = v.wrapping_add(1);
                 }
             }
+            1 => {
+                str.push('-');
+                if let Some(v) = state.known_loads.get_mut(&state.shift) {
+                    *v = v.wrapping_sub(1);
+                } else if !state.written.contains(&state.shift) {
+                    let v = state.known_adds.entry(state.shift).or_insert(0);
+                    *v = v.wrapping_sub(1);
+                }
+            }
+            2 => {
+                str.push('<');
+                state.shift -= 1;
+            }
+            3 => {
+                str.push('>');
+                state.shift += 1;
+            }
+            4 => {
+                str.push(',');
+                state.written.insert(state.shift);
+                state.known_adds.remove(&state.shift);
+                state.known_loads.remove(&state.shift);
+            }
+            5 => {
+                str.push('.');
+                state.has_out = true;
+            }
             6 => {
-                if stack.is_empty() {
-                    str.push('[');
-                    stack.push(true);
-                    missing_outs += 1;
-                } else {
-                    if stack.pop().unwrap() {
+                if stack.len() > 1 {
+                    let prev_state = stack.pop().unwrap();
+                    if !prev_state.finite() && !prev_state.has_out {
                         str.push('.');
-                        missing_outs -= 1;
                     }
                     str.push(']');
+                    let state = stack.last_mut().unwrap();
+                    if prev_state.initial_cond != Some(0) {
+                        if prev_state.sub_shift || prev_state.shift != 0 {
+                            state.sub_shift = true;
+                            state.written.clear();
+                            state.known_adds.clear();
+                            state.known_loads.clear();
+                        } else {
+                            for &var in prev_state
+                                .known_adds
+                                .keys()
+                                .chain(prev_state.known_loads.keys())
+                                .chain(prev_state.written.iter())
+                            {
+                                let var = state.shift + var;
+                                state.written.insert(var);
+                                state.known_adds.remove(&var);
+                                state.known_loads.remove(&var);
+                            }
+                        }
+                        if prev_state.initial_cond.is_some() {
+                            if prev_state.has_out {
+                                state.has_out = true;
+                            }
+                            for (&var, &val) in &prev_state.known_loads {
+                                state
+                                    .known_loads
+                                    .insert(state.shift + var - prev_state.shift, val);
+                            }
+                        }
+                    }
                 }
             }
             _ => {
                 str.push('[');
-                stack.push(true);
-                missing_outs += 1;
+                let initial_cond = state.known_loads.get(&state.shift).copied();
+                stack.push(GenState::new(initial_cond));
             }
         }
     }
-    for missing_out in stack.into_iter().rev() {
-        if missing_out {
+    for state in stack.into_iter().skip(1).rev() {
+        if !state.finite() && !state.has_out {
             str.push('.');
         }
         str.push(']');
@@ -68,10 +162,10 @@ fn result_with<'code, C: CellType, E: Executor<'code, C>>(
     opt: u32,
 ) -> Vec<u8> {
     let mut input = Vec::new();
-    for i in 0..1024 {
-        input.push(i as u8);
+    for i in 1..=1024 {
+        input.push((183 * i) as u8);
     }
-    let mut output = vec![0; 1024];
+    let mut output = input.clone();
     let mut context = Context::new(Some(Box::new(&input[..])), Some(Box::new(&mut output[..])));
     let exec = E::create(code, no_opt, opt).unwrap();
     exec.execute(&mut context).unwrap();
@@ -83,15 +177,15 @@ fn result_with<'code, C: CellType, E: Executor<'code, C>>(
 /// of all the executors is identical.
 fn check_code<'code>(code: &'code str) -> bool {
     let inplace = result_with::<u8, InplaceInterpreter<'code, u8>>(code, false, 0);
-    let baseint_no_opt = result_with::<u8, BaseInterpreter<u8>>(code, false, 0);
+    let baseint_no_opt = result_with::<u8, BaseInterpreter<u8>>(code, true, 0);
     if inplace != baseint_no_opt {
         return false;
     }
-    let baseint = result_with::<u8, BaseInterpreter<u8>>(code, true, 1);
+    let baseint = result_with::<u8, BaseInterpreter<u8>>(code, false, 1);
     if inplace != baseint {
         return false;
     }
-    let baseint_opt3 = result_with::<u8, BaseInterpreter<u8>>(code, true, 3);
+    let baseint_opt3 = result_with::<u8, BaseInterpreter<u8>>(code, false, 3);
     if inplace != baseint_opt3 {
         return false;
     }
@@ -165,31 +259,33 @@ fn main() {
     } else {
         let dir = Path::new(&directory);
         fs::create_dir_all(dir).unwrap();
-        let random = RandomState::new();
-        let mut last = Instant::now();
-        let mut hasher = random.build_hasher();
-        for i in 0.. {
-            hasher.write_usize(i);
-            let code = generate_code(&mut hasher, max_len);
-            if check_code(&code) {
-                success += 1;
-            } else {
-                failure += 1;
-                let timestamp = SystemTime::now();
-                let path = dir.join(
-                    timestamp
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos()
-                        .to_string()
-                        + ".bf",
-                );
-                fs::write(path, code).unwrap();
-            }
-            let now = Instant::now();
-            if now.duration_since(last) > Duration::from_secs(2) {
-                print_status(success, failure);
-                last = now;
+        loop {
+            let random = RandomState::new();
+            let mut last = Instant::now();
+            let mut hasher = random.build_hasher();
+            for i in 0..100_000 {
+                hasher.write_usize(i);
+                let code = generate_code(&mut hasher, max_len);
+                if check_code(&code) {
+                    success += 1;
+                } else {
+                    failure += 1;
+                    let timestamp = SystemTime::now();
+                    let path = dir.join(
+                        timestamp
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos()
+                            .to_string()
+                            + ".bf",
+                    );
+                    fs::write(path, code).unwrap();
+                }
+                let now = Instant::now();
+                if now.duration_since(last) > Duration::from_secs(2) {
+                    print_status(success, failure);
+                    last = now;
+                }
             }
         }
     }
