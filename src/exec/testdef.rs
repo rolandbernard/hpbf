@@ -115,6 +115,20 @@ macro_rules! executor_tests {
                 assert_eq!(String::from_utf8(buf).unwrap(), "~zyx mlk");
                 Ok(())
             }
+
+            #[test]
+            fn test_program_infinite_loop() -> Result<(), Error<'static>> {
+                let mut buf = vec![0; 1024];
+                let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf[..])));
+                let code = "+>-[[...<..>[.]].]";
+                let exec = $i::<u64>::create(code, false, 1)?;
+                exec.execute(&mut ctx)?;
+                drop(ctx);
+                let mut expected = vec![255, 255, 255, 1, 1];
+                expected.append(&mut vec![255; 1019]);
+                assert_eq!(buf, expected);
+                Ok(())
+            }
         }
     };
 }
