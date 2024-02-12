@@ -309,34 +309,34 @@ impl<'p, C: CellType> OptRebuildState<'p, C> {
         return vec;
     }
 
-    fn pending_adds(&self) -> Vec<(isize, C)> {
+    fn pending_adds(&self, with_cond: bool) -> Vec<(isize, C)> {
         let mut vec = self
             .pending_adds
             .iter()
             .map(|(k, v)| (*k, *v))
-            .filter(|(k, _)| *k != self.shift && !self.written.contains(k))
+            .filter(|(k, _)| (with_cond || *k != self.shift) && !self.written.contains(k))
             .collect::<Vec<_>>();
         vec.sort();
         return vec;
     }
 
-    fn pending_final_adds(&self) -> Vec<(isize, C)> {
+    fn pending_final_adds(&self, with_cond: bool) -> Vec<(isize, C)> {
         let mut vec = self
             .pending_adds
             .iter()
             .map(|(k, v)| (*k, *v))
-            .filter(|(k, _)| *k != self.shift && self.written.contains(k))
+            .filter(|(k, _)| (with_cond || *k != self.shift) && self.written.contains(k))
             .collect::<Vec<_>>();
         vec.sort();
         return vec;
     }
 
-    fn pending_loads(&self) -> Vec<(isize, C)> {
+    fn pending_loads(&self, with_cond: bool) -> Vec<(isize, C)> {
         let mut vec = self
             .pending_loads
             .iter()
             .map(|(k, v)| (*k, *v))
-            .filter(|(k, _)| *k != self.shift)
+            .filter(|(k, _)| with_cond || *k != self.shift)
             .collect::<Vec<_>>();
         vec.sort();
         return vec;
@@ -656,7 +656,7 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                         let in_shift = sub_state_shift != 0 || sub_state.in_shift;
                         let out_shift = sub_state_shift != 0 || sub_state.out_shift;
                         if !no_effect && !loop_analysis.simple() {
-                            for (var, _) in sub_state.pending_adds() {
+                            for (var, _) in sub_state.pending_adds(!is_loop) {
                                 sub_state.emit(var);
                             }
                         }
@@ -679,9 +679,9 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                         let known_adds = sub_state.known_adds.clone();
                         let known_loads = sub_state.known_loads.clone();
                         let pending_cond = sub_state.has_pending(sub_state_shift);
-                        let pending_adds = sub_state.pending_adds();
-                        let pending_final_adds = sub_state.pending_final_adds();
-                        let pending_loads = sub_state.pending_loads();
+                        let pending_adds = sub_state.pending_adds(!is_loop);
+                        let pending_final_adds = sub_state.pending_final_adds(!is_loop);
+                        let pending_loads = sub_state.pending_loads(!is_loop);
                         let can_eliminate =
                             !in_shift && sub_state.insts.is_empty() && loop_analysis.finite();
                         let needs_if = at_most_once
