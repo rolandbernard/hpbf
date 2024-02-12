@@ -265,7 +265,11 @@ impl<'p, C: CellType> OptRebuildState<'p, C> {
     fn load(&mut self, dst: isize, val: C) {
         if self.get(dst) != OptValue::Known(val) {
             self.pending_adds.remove(&dst);
-            self.pending_loads.insert(dst, val);
+            if self.mem.get(dst) == OptValue::Known(val) {
+                self.pending_loads.remove(&dst);
+            } else {
+                self.pending_loads.insert(dst, val);
+            }
         }
     }
 
@@ -645,6 +649,7 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                         let no_sub_return = sub_state.no_return;
                         let no_return = loop_analysis.infinite()
                             || (no_sub_return && loop_analysis.at_least_once());
+                        let at_most_once = no_sub_return || loop_analysis.at_most_once();
                         let no_effect =
                             !loop_analysis.visible_effect() || no_return || no_sub_return;
                         let sub_state_shift = sub_state.shift;
@@ -655,7 +660,7 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                                 sub_state.emit(var);
                             }
                         }
-                        if !no_sub_return && !loop_analysis.at_most_once() {
+                        if !no_sub_return && !at_most_once {
                             if in_shift {
                                 for var in sub_state.pending() {
                                     sub_state.emit(var);
@@ -679,12 +684,13 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                         let pending_loads = sub_state.pending_loads();
                         let can_eliminate =
                             !in_shift && sub_state.insts.is_empty() && loop_analysis.finite();
-                        let needs_if = loop_analysis.at_most_once()
-                            || (!no_effect
-                                && !loop_analysis.at_least_once()
-                                && (!pending_loads.is_empty() || !pending_final_adds.is_empty()));
+                        let needs_if = at_most_once
+                            || !loop_analysis.at_least_once()
+                                && (!no_effect
+                                    && (!pending_loads.is_empty()
+                                        || !pending_final_adds.is_empty()));
                         let mut new_insts = Vec::new();
-                        if loop_analysis.at_most_once() {
+                        if at_most_once {
                             new_insts.append(&mut sub_state.insts);
                         } else if !can_eliminate {
                             let sub_block_id = self.blocks.len();
@@ -695,6 +701,7 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                                     insts: sub_state.insts,
                                 })
                                 .or_insert(sub_block_id);
+                            reads.push(0);
                             new_insts.push(Instr::Loop {
                                 cond: if needs_if { 0 } else { cond },
                                 block: sub_block_id,
@@ -705,7 +712,7 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                                 writes.insert(var);
                                 new_insts.push(Instr::Load {
                                     val,
-                                    dst: if loop_analysis.at_most_once() {
+                                    dst: if at_most_once {
                                         var
                                     } else {
                                         if needs_if {
@@ -721,7 +728,7 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                                 reads.push(var);
                                 new_insts.push(Instr::Add {
                                     val,
-                                    dst: if loop_analysis.at_most_once() {
+                                    dst: if at_most_once {
                                         var
                                     } else {
                                         if needs_if {
@@ -733,19 +740,16 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                                 })
                             }
                         }
-                        if needs_if {
+                        if needs_if && (sub_state_shift != 0 || !new_insts.is_empty()) {
                             let sub_block_id = self.blocks.len();
                             let sub_block_id = *self
                                 .blocks
                                 .entry(Block {
-                                    shift: if loop_analysis.at_most_once() {
-                                        sub_state_shift
-                                    } else {
-                                        0
-                                    },
+                                    shift: if at_most_once { sub_state_shift } else { 0 },
                                     insts: new_insts,
                                 })
                                 .or_insert(sub_block_id);
+                            reads.push(0);
                             new_insts = vec![Instr::If {
                                 cond,
                                 block: sub_block_id,
@@ -757,7 +761,6 @@ impl<'p, C: CellType> Optimizer<'p, C> {
                                 state.emit(var);
                             }
                         } else {
-                            state.emit(cond);
                             for var in reads {
                                 state.emit(cond + var);
                             }
@@ -841,6 +844,11 @@ impl<'p, C: CellType> Optimizer<'p, C> {
     fn rebuild(&mut self) {
         let mut state = OptRebuildState::new(OptMemFallback::Constant(OptValue::Known(C::ZERO)));
         self.rebuild_block(self.original.entry, &mut state);
+        if !state.no_return {
+            for var in state.pending() {
+                state.emit(var);
+            }
+        }
         self.entry = self.blocks.len();
         self.blocks.insert(
             Block {
