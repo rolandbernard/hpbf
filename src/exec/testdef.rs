@@ -118,3 +118,73 @@ macro_rules! executor_tests {
         }
     };
 }
+
+// This is not actually unused, but the compiler seems to think it is.
+#[allow(unused_macros)]
+macro_rules! same_as_inplace_test {
+    ($i:ident, $c:expr, $n:ident) => {
+        #[test]
+        fn $n() -> Result<(), Error<'static>> {
+            let code = $c;
+            let mut input = Vec::new();
+            for i in 1..=1024 {
+                input.push((183 * i) as u8);
+            }
+            let mut out_inplace = input.clone();
+            let mut out_to_test = input.clone();
+            let mut ctx_inplace = Context::<u8>::new(
+                Some(Box::new(&input[..])),
+                Some(Box::new(&mut out_inplace[..])),
+            );
+            let mut ctx_to_test = Context::<u8>::new(
+                Some(Box::new(&input[..])),
+                Some(Box::new(&mut out_to_test[..])),
+            );
+            InplaceInterpreter::<u8>::create(code, false, 3)?.execute(&mut ctx_inplace)?;
+            $i::<u8>::create(code, false, 3)?.execute(&mut ctx_to_test)?;
+            drop(ctx_inplace);
+            drop(ctx_to_test);
+            assert_eq!(out_to_test, out_inplace);
+            Ok(())
+        }
+    };
+}
+
+macro_rules! same_as_inplace_tests {
+    ($i:ident) => {
+        #[cfg(test)]
+        mod tests_same_as_inplace {
+            use crate::{$i, Context, Error, Executor, InplaceInterpreter};
+
+            same_as_inplace_test!($i, "<+[-..+]", infinite_loop_with_canceling_cond);
+            same_as_inplace_test!($i, "+>-[[...<..>[.]].]", no_return_reading_two_cells);
+            same_as_inplace_test!($i, "--.[.[+<->.]<]-+", muladd_must_be_performed_before_loop);
+            same_as_inplace_test!($i, "[-->-<-.]..-<+.[.]", loop_elimination);
+            same_as_inplace_test!($i, ",-[.]", infinite_loop_depending_on_input);
+            same_as_inplace_test!($i, ",.[>.[.]>+.<]>-[.]", loop_elimination_inside_if);
+            same_as_inplace_test!($i, "<+[<,->+.]<[+.<]", pending_add_after_input);
+            same_as_inplace_test!($i, "+>-<[>,<+.]>-[.]", add_overwritten_by_input_in_loop);
+            same_as_inplace_test!($i, "+>+[[[<.]+.]-<.]", nested_infinite_loop);
+            same_as_inplace_test!($i, "--<,[+>,<...]>..", input_controlled_loop_taken);
+            same_as_inplace_test!(
+                $i,
+                "--<,,,,,,,-[+>,<...]>..",
+                input_controlled_loop_not_taken
+            );
+            same_as_inplace_test!($i, ",-[+<[->..].]>-[.]", moving_if);
+            same_as_inplace_test!($i, ">>+,,.[<[.]+.-].", loop_to_if_pending_cond_preservation);
+            same_as_inplace_test!(
+                $i,
+                "+>+[<-[.]+.>]<->",
+                canceling_cond_after_loop_elimination
+            );
+            same_as_inplace_test!($i, "--[[>+<.[-,>>>.]-[+<<.]<]+>->>.]", non_optimizable);
+            same_as_inplace_test!($i, "-+,+[,>,,.[.<-.]-<[[<.]<+[.].]>]", non_optimizable2);
+            same_as_inplace_test!(
+                $i,
+                ",-[,[-<,.+>>><-.+[.]].+[.][.]<<]",
+                ifs_do_not_guarantee_zero_of_cond
+            );
+        }
+    };
+}

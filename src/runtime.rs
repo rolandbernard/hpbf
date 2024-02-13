@@ -40,6 +40,14 @@ impl<C: CellType> Memory<C> {
         }
     }
 
+    /// Returns a pointer to the current location in the buffer. Requesting the
+    /// buffer does not mean that the memory located at the returned address is
+    /// actually accessible. To ensure the pointer points to valid memory,
+    /// call [`Self::make_accessible`] beforehand.
+    pub fn current_ptr(&self) -> *mut C {
+        self.buffer.wrapping_add(self.offset)
+    }
+
     /// Move the current pointer. No memory will be allocated.
     pub fn mov(&mut self, offset: isize) {
         self.offset = self.offset.wrapping_add_signed(offset);

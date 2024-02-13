@@ -22,6 +22,8 @@ pub struct BaseInterpreter<C: CellType> {
 }
 
 impl<C: CellType> BaseInterpreter<C> {
+    /// Print the IR representation internal to the interpreter. This prints the
+    /// IR after the optimization performed during interpreter creation.
     pub fn print_ir(&self) {
         println!("{:#?}", self.program);
     }
@@ -93,3 +95,4 @@ impl<'p, C: CellType> Executor<'p, C> for BaseInterpreter<C> {
 }
 
 executor_tests!(BaseInterpreter);
+same_as_inplace_tests!(BaseInterpreter);
