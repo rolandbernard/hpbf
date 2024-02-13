@@ -209,14 +209,15 @@ impl<C: CellType> OptBlockAnalysis<C> {
     ) -> impl Iterator<Item = isize> + 'a {
         self.written
             .iter()
-            .chain(
-                self.known_loads
-                    .iter()
-                    .filter(move |(k, v)| state.get(off + **k) != OptValue::Known(**v))
-                    .map(|(k, _)| k),
-            )
+            .chain(self.known_loads.keys())
             .chain(self.known_adds.keys())
             .copied()
+            .filter(move |k| {
+                !matches!(
+                    self.known_loads.get(k),
+                    Some(v) if state.get(off + *k) == OptValue::Known(*v)
+                )
+            })
     }
 }
 
