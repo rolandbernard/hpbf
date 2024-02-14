@@ -1,5 +1,6 @@
 //! Library for executing Brainfuck programs.
 
+mod analy;
 mod exec;
 mod ir;
 mod opt;

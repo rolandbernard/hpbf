@@ -2,7 +2,9 @@
 
 use std::{env, fs::File, io::Read, process::exit};
 
-use hpbf::{BaseInterpreter, CellType, Context, Error, ErrorKind, Executor, InplaceInterpreter};
+use hpbf::{
+    BaseInterpreter, CellType, Context, Error, ErrorKind, Executor, InplaceInterpreter, Program,
+};
 
 enum ExecutorKind {
     Inplace,
@@ -65,6 +67,7 @@ fn execute_code<C: CellType>(
     if print_ir {
         let exec = BaseInterpreter::<C>::create(code, no_opt, opt)?;
         exec.print_ir();
+        println!("{:?}", Program::<C>::parse(code)?.poly_block());
     } else {
         let mut cxt = Context::<C>::with_stdio();
         match kind {
