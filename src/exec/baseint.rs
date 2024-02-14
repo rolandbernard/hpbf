@@ -31,7 +31,7 @@ impl<C: CellType> BaseInterpreter<C> {
     /// Execute a single block within the given program. The block does not necessary
     /// have to be part of the program, but all loops and ifs must refer to blocks
     /// within the program.
-    fn execute_block(&self, cxt: &mut Context<C>, block: &Block<C>) -> Result<(), ()> {
+    fn execute_block(&self, cxt: &mut Context<C>, block: &Block<C>) -> Option<()> {
         for instr in &block.insts {
             match *instr {
                 Instr::Output { src } => {
@@ -72,7 +72,7 @@ impl<C: CellType> BaseInterpreter<C> {
                 }
             }
         }
-        Ok(())
+        Some(())
     }
 }
 
@@ -88,8 +88,7 @@ impl<'p, C: CellType> Executor<'p, C> for BaseInterpreter<C> {
     }
 
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error<'p>> {
-        self.execute_block(context, &self.program.blocks[self.program.entry])
-            .ok();
+        self.execute_block(context, &self.program.blocks[self.program.entry]);
         Ok(())
     }
 }

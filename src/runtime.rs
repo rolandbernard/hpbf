@@ -153,27 +153,27 @@ impl<'a, C: CellType> Context<'a, C> {
 
     /// Input one byte from standard input.
     #[cold]
-    pub fn input(&mut self) -> Result<u8, ()> {
+    pub fn input(&mut self) -> Option<u8> {
         if let Some(input) = &mut self.input {
             let mut result = [0];
-            input.read(&mut result).map_err(|_| ())?;
-            Ok(result[0])
+            input.read(&mut result).ok()?;
+            Some(result[0])
         } else {
-            Err(())
+            None
         }
     }
 
     /// Output one byte to standard output.
     #[cold]
-    pub fn output(&mut self, value: u8) -> Result<(), ()> {
+    pub fn output(&mut self, value: u8) -> Option<()> {
         if let Some(output) = &mut self.output {
             match output.write(&[value]) {
-                Ok(0) => Err(()),
-                Err(_) => Err(()),
-                _ => Ok(()),
+                Ok(0) => None,
+                Err(_) => None,
+                _ => Some(()),
             }
         } else {
-            Ok(())
+            Some(())
         }
     }
 }
@@ -282,8 +282,8 @@ mod tests {
     fn input_reads_from_input() {
         let buf = vec![42, 1, 3];
         let mut ctx = Context::<u8>::new(Some(Box::new(buf.as_slice())), None);
-        assert_eq!(ctx.input(), Ok(42));
-        assert_eq!(ctx.input(), Ok(1));
-        assert_eq!(ctx.input(), Ok(3));
+        assert_eq!(ctx.input(), Some(42));
+        assert_eq!(ctx.input(), Some(1));
+        assert_eq!(ctx.input(), Some(3));
     }
 }

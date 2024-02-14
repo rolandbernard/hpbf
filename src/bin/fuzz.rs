@@ -162,7 +162,7 @@ fn result_with<'code, C: CellType, E: Executor<'code, C>>(
     opt: u32,
 ) -> Vec<u8> {
     let mut input = Vec::new();
-    for i in 1..=1024 {
+    for i in 0..1024 {
         input.push((183 * i) as u8);
     }
     let mut output = input.clone();

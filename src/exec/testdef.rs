@@ -127,7 +127,7 @@ macro_rules! same_as_inplace_test {
         fn $n() -> Result<(), Error<'static>> {
             let code = $c;
             let mut input = Vec::new();
-            for i in 1..=1024 {
+            for i in 0..1024 {
                 input.push((183 * i) as u8);
             }
             let mut out_inplace = input.clone();

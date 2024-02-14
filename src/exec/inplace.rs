@@ -56,12 +56,12 @@ impl<'code, C: CellType> Executor<'code, C> for InplaceInterpreter<'code, C> {
                         .write(0, context.memory.read(0).wrapping_add(C::NEG_ONE));
                 }
                 b'.' => {
-                    if let Err(_) = context.output(context.memory.read(0).into_u8()) {
+                    if let None = context.output(context.memory.read(0).into_u8()) {
                         return Ok(());
                     }
                 }
                 b',' => {
-                    if let Ok(val) = context.input() {
+                    if let Some(val) = context.input() {
                         context.memory.write(0, C::from_u8(val));
                     } else {
                         return Ok(());
