@@ -33,41 +33,39 @@ impl<C: CellType> BaseInterpreter<C> {
     /// within the program.
     fn execute_block(&self, cxt: &mut Context<C>, block: &Block<C>) -> Option<()> {
         for instr in &block.insts {
-            match *instr {
+            match instr {
                 Instr::Output { src } => {
-                    cxt.output(cxt.memory.read(src).into_u8())?;
+                    cxt.output(cxt.memory.read(*src).into_u8())?;
                 }
                 Instr::Input { dst } => {
                     let val = C::from_u8(cxt.input()?);
-                    cxt.memory.write(dst, val);
+                    cxt.memory.write(*dst, val);
                 }
-                Instr::Load { val, dst } => {
-                    cxt.memory.write(dst, val);
-                }
-                Instr::Add { val, dst } => {
-                    let val = val.wrapping_add(cxt.memory.read(dst));
-                    cxt.memory.write(dst, val);
-                }
-                Instr::MulAdd { val, src, dst } => {
-                    let val = val
-                        .wrapping_mul(cxt.memory.read(src))
-                        .wrapping_add(cxt.memory.read(dst));
-                    cxt.memory.write(dst, val);
+                Instr::Calc { calcs } => {
+                    if calcs.len() == 1 {
+                        let (var, expr) = &calcs[0];
+                        let val = expr.evaluate(|off| cxt.memory.read(off));
+                        cxt.memory.write(*var, val);
+                    } else {
+                        let mut buffer = Vec::with_capacity(calcs.len());
+                        for (_, expr) in calcs {
+                            buffer.push(expr.evaluate(|off| cxt.memory.read(off)));
+                        }
+                        for (&(var, _), val) in calcs.iter().zip(buffer.into_iter()) {
+                            cxt.memory.write(var, val);
+                        }
+                    }
                 }
                 Instr::Loop { cond, block } => {
-                    let block = &self.program.blocks[block];
-                    while cxt.memory.read(cond) != C::ZERO {
-                        cxt.memory.mov(cond);
+                    while cxt.memory.read(*cond) != C::ZERO {
                         self.execute_block(cxt, block)?;
-                        cxt.memory.mov(block.shift - cond);
+                        cxt.memory.mov(block.shift);
                     }
                 }
                 Instr::If { cond, block } => {
-                    if cxt.memory.read(cond) != C::ZERO {
-                        cxt.memory.mov(cond);
-                        let block = &self.program.blocks[block];
+                    if cxt.memory.read(*cond) != C::ZERO {
                         self.execute_block(cxt, block)?;
-                        cxt.memory.mov(block.shift - cond);
+                        cxt.memory.mov(block.shift);
                     }
                 }
             }
@@ -88,7 +86,7 @@ impl<'p, C: CellType> Executor<'p, C> for BaseInterpreter<C> {
     }
 
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error<'p>> {
-        self.execute_block(context, &self.program.blocks[self.program.entry]);
+        self.execute_block(context, &self.program);
         Ok(())
     }
 }

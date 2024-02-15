@@ -7,12 +7,24 @@ use std::{
 
 use crate::{CellType, Error, ErrorKind};
 
-/// Represents a complete Brainfuck program.
-#[derive(Clone, PartialEq)]
-pub struct Program<C: CellType> {
-    pub entry: usize,
-    pub blocks: Vec<Block<C>>,
+/// Parts of expression. Represents the product of the coefficient and the set
+/// of variables.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct ExprPart<C: CellType> {
+    coef: C,
+    vars: Vec<isize>,
 }
+
+/// An expression used in the IR to represent a calculation. Expressions in the
+/// IR represent sums of products. Currently, all expressions are normalized.
+/// This ensures that two equivalent expressions compare ans hash equals.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct Expr<C: CellType> {
+    parts: Vec<ExprPart<C>>,
+}
+
+/// Represents a complete Brainfuck program.
+pub type Program<C> = Block<C>;
 
 /// Represents the inside of a loop.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -28,11 +40,229 @@ pub struct Block<C: CellType> {
 pub enum Instr<C: CellType> {
     Output { src: isize },
     Input { dst: isize },
-    Load { val: C, dst: isize },
-    Add { val: C, dst: isize },
-    MulAdd { val: C, src: isize, dst: isize },
-    Loop { cond: isize, block: usize },
-    If { cond: isize, block: usize },
+    Calc { calcs: Vec<(isize, Expr<C>)> },
+    Loop { cond: isize, block: Block<C> },
+    If { cond: isize, block: Block<C> },
+}
+
+impl<C: CellType> Expr<C> {
+    /// Return the expression representing the constant value given by `coef`.
+    pub fn val(coef: C) -> Self {
+        if coef == C::ZERO {
+            Expr { parts: vec![] }
+        } else {
+            Expr {
+                parts: vec![ExprPart { coef, vars: vec![] }],
+            }
+        }
+    }
+
+    /// Return the expression representing the value at memory offset `var`.
+    pub fn var(var: isize) -> Self {
+        Expr {
+            parts: vec![ExprPart {
+                coef: C::ONE,
+                vars: vec![var],
+            }],
+        }
+    }
+
+    /// Multiply two expressions and return the resulting expressions.
+    pub fn mul(&self, other: &Self) -> Self {
+        let mut parts = HashMap::new();
+        for self_part in &self.parts {
+            for other_part in &other.parts {
+                let mut vars = self_part
+                    .vars
+                    .iter()
+                    .chain(other_part.vars.iter())
+                    .copied()
+                    .collect::<Vec<_>>();
+                vars.sort();
+                let coef = self_part.coef.wrapping_mul(other_part.coef);
+                let v = parts.entry(vars).or_insert(C::ZERO);
+                *v = v.wrapping_add(coef);
+            }
+        }
+        let mut parts = parts
+            .into_iter()
+            .filter(|(_, coef)| *coef != C::ZERO)
+            .map(|(vars, coef)| ExprPart { coef, vars })
+            .collect::<Vec<_>>();
+        parts.sort_by(|a, b| a.vars.cmp(&b.vars));
+        Expr { parts }
+    }
+
+    /// Add two expressions and return the resulting expressions.
+    pub fn add(&self, other: &Self) -> Self {
+        let (mut i, mut j) = (0, 0);
+        let mut parts = Vec::new();
+        while i < self.parts.len() && j < other.parts.len() {
+            if self.parts[i].vars < other.parts[j].vars {
+                parts.push(self.parts[i].clone());
+                i += 1;
+            } else if self.parts[i].vars > other.parts[j].vars {
+                parts.push(other.parts[j].clone());
+                j += 1;
+            } else {
+                let coef = self.parts[i].coef.wrapping_add(other.parts[j].coef);
+                if coef != C::ZERO {
+                    parts.push(ExprPart {
+                        coef,
+                        vars: self.parts[i].vars.clone(),
+                    });
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+        while i < self.parts.len() {
+            parts.push(self.parts[i].clone());
+            i += 1;
+        }
+        while j < other.parts.len() {
+            parts.push(other.parts[j].clone());
+            j += 1;
+        }
+        Expr { parts }
+    }
+
+    /// If this expression has a constant value, return that constant value.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hpbf::{Expr};
+    /// let expr = Expr::<u8>::val(5);
+    /// assert_eq!(expr.constant(), Some(5));
+    /// let expr = Expr::<u8>::var(0).add(&Expr::<u8>::val(5));
+    /// assert_eq!(expr.constant(), None);
+    /// ```
+    pub fn constant(&self) -> Option<C> {
+        if self.parts.is_empty() {
+            Some(C::ZERO)
+        } else if self.parts.len() == 1 && self.parts[0].vars.is_empty() {
+            Some(self.parts[0].coef)
+        } else {
+            None
+        }
+    }
+
+    /// If this expression is a simple sum of the variable `var` with some other
+    /// expression, return that expression.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hpbf::{Expr};
+    /// let expr = Expr::<u8>::var(0).add(&Expr::<u8>::val(5));
+    /// assert_eq!(expr.inc_of(0), Some(Expr::val(5)));
+    /// assert_eq!(expr.inc_of(1), None);
+    /// ```
+    pub fn inc_of(&self, var: isize) -> Option<Expr<C>> {
+        if self
+            .parts
+            .iter()
+            .any(|part| part.vars.len() == 1 && part.vars[0] == var)
+            && self
+                .parts
+                .iter()
+                .all(|part| !part.vars.contains(&var) || part.vars.len() == 1)
+        {
+            Some(Expr {
+                parts: self
+                    .parts
+                    .iter()
+                    .filter(|part| part.vars.len() != 1 || part.vars[0] != var)
+                    .cloned()
+                    .collect(),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Combination of [`Self::inc_of`] and [`Self::constant`].
+    ///
+    /// # Examples
+    /// ```
+    /// # use hpbf::{Expr};
+    /// let expr = Expr::<u8>::val(5);
+    /// assert_eq!(expr.const_inc_of(0), None);
+    /// let expr = Expr::<u8>::var(0).add(&Expr::<u8>::val(5));
+    /// assert_eq!(expr.const_inc_of(0), Some(5));
+    /// let expr = Expr::<u8>::var(0).add(&Expr::<u8>::var(5));
+    /// assert_eq!(expr.const_inc_of(0), None);
+    /// ```
+    pub fn const_inc_of(&self, var: isize) -> Option<C> {
+        if self
+            .parts
+            .iter()
+            .any(|part| part.vars.len() == 1 && part.vars[0] == var)
+            && self
+                .parts
+                .iter()
+                .filter(|part| part.vars.len() != 1 || part.vars[0] != var)
+                .all(|part| part.vars.is_empty())
+        {
+            for part in &self.parts {
+                if part.vars.is_empty() {
+                    return Some(part.coef);
+                }
+            }
+            return Some(C::ZERO);
+        } else {
+            return None;
+        }
+    }
+
+    /// Evaluate the expression by taking getting variable values from the
+    /// provided function.
+    pub fn evaluate<F: Fn(isize) -> C>(&self, func: F) -> C {
+        let mut val = C::ZERO;
+        for part in &self.parts {
+            let mut part_val = part.coef;
+            for &var in &part.vars {
+                part_val = part_val.wrapping_mul(func(var));
+            }
+            val = val.wrapping_add(part_val);
+        }
+        return val;
+    }
+
+    /// Evaluate the expression by taking getting variable values from the
+    /// provided function. This differs from [`Self::evaluate`] in that the
+    /// values returned for the variables are in turn expressions.
+    pub fn symb_evaluate<'a, F>(&'a self, func: F) -> Option<Self>
+    where
+        F: Fn(isize) -> Option<&'a Self>,
+    {
+        let mut val = Expr::val(C::ZERO);
+        for part in &self.parts {
+            let mut part_val = Expr::val(part.coef);
+            for &var in &part.vars {
+                part_val = part_val.mul(func(var)?);
+            }
+            val = val.add(&part_val);
+        }
+        return Some(val);
+    }
+}
+
+impl<C: CellType> Instr<C> {
+    /// Create an instruction equivalent to loading the value `val` into the
+    /// variable `var`.
+    pub fn load(var: isize, val: C) -> Instr<C> {
+        Instr::Calc {
+            calcs: vec![(var, Expr::val(val))],
+        }
+    }
+
+    /// Create an instruction equivalent to adding the value `val` onto the
+    /// value already in the variable `var`.
+    pub fn add(var: isize, val: C) -> Instr<C> {
+        Instr::Calc {
+            calcs: vec![(var, Expr::val(val).add(&Expr::var(var)))],
+        }
+    }
 }
 
 impl<C: CellType> Program<C> {
@@ -44,38 +274,36 @@ impl<C: CellType> Program<C> {
     /// ```
     /// # use hpbf::{Program, Block, Instr, Error};
     /// use Instr::*;
-    /// let prog = Program::<u8>::parse("+[-->-[>>+>-----<<]<--<---]>-.>>>+.>>..+++[.>]<<<<.+++.------.<<-.>>>>+.")?;
+    /// let prog = Program::<u8>::parse("+[-->-[>>+>-----<<]<--<---]>-.")?;
     /// assert_eq!(prog,
     ///     Program {
-    ///         entry: 3,
-    ///         blocks: vec![
-    ///             Block { shift: 1, insts: vec![
-    ///                 Add { val: 1, dst: 2 }, Add { val: 251, dst: 3 }
-    ///             ]},
-    ///             Block { shift: -1, insts: vec![
-    ///                 Add { val: 254, dst: 0 }, Add { val: 255, dst: 1 },
-    ///                 Loop { cond: 1, block: 0 }, Add { val: 253, dst: -1 },
-    ///                 Add { val: 254, dst: 0 }
-    ///             ]},
-    ///             Block { shift: 1, insts: vec![Output { src: 0 }]},
-    ///             Block { shift: 4, insts: vec![
-    ///                 Add { val: 1, dst: 0 }, Loop { cond: 0, block: 1 },
-    ///                 Add { val: 255, dst: 1 }, Output { src: 1 },
-    ///                 Add { val: 1, dst: 4 }, Output { src: 4 }, Output { src: 6 },
-    ///                 Output { src: 6 }, Add { val: 3, dst: 6 },
-    ///                 Loop { cond: 6, block: 2 }, Output { src: 2 },
-    ///                 Add { val: 3, dst: 2 }, Output { src: 2 },
-    ///                 Add { val: 250, dst: 2 }, Output { src: 2 },
-    ///                 Add { val: 255, dst: 0 }, Output { src: 0 },
-    ///                 Add { val: 1, dst: 4 }, Output { src: 4 },
-    ///             ]},
+    ///         shift: 1,
+    ///         insts: vec![
+    ///             Instr::add(0, 1),
+    ///             Loop { cond: 0, block: Block { 
+    ///                 shift: -1,
+    ///                 insts: vec![
+    ///                     Instr::add(0, 254),
+    ///                     Instr::add(1, 255),
+    ///                     Loop { cond: 1, block: Block {
+    ///                         shift: 1,
+    ///                         insts: vec![
+    ///                             Instr::add(3, 1),
+    ///                             Instr::add(4, 251),
+    ///                         ]
+    ///                     } },
+    ///                     Instr::add(-1, 253),
+    ///                     Instr::add(0, 254),
+    ///                 ]
+    ///             } },
+    ///             Instr::add(1, 255),
+    ///             Output { src: 1 },
     ///         ]
     ///     }
     /// );
     /// # Ok::<(), Error>(())
     /// ```
     pub fn parse<'str>(program: &'str str) -> Result<Self, Error<'str>> {
-        let mut blocks = HashMap::new();
         let mut stack = vec![(0, false, Vec::new(), HashMap::new())];
         let mut positions = vec![];
         for (i, char) in program.chars().enumerate() {
@@ -98,10 +326,7 @@ impl<C: CellType> Program<C> {
                 '.' => {
                     let val = buff.entry(*shift).or_insert(C::ZERO);
                     if *val != C::ZERO {
-                        insts.push(Instr::Add {
-                            val: *val,
-                            dst: *shift,
-                        });
+                        insts.push(Instr::add(*shift, *val));
                         *val = C::ZERO;
                     }
                     insts.push(Instr::Output { src: *shift });
@@ -112,7 +337,8 @@ impl<C: CellType> Program<C> {
                 }
                 '[' => {
                     positions.push(i);
-                    stack.push((0, false, Vec::new(), HashMap::new()));
+                    let cond = *shift;
+                    stack.push((cond, false, Vec::new(), HashMap::new()));
                 }
                 ']' => {
                     if positions.len() == 0 {
@@ -128,45 +354,34 @@ impl<C: CellType> Program<C> {
                     vars.sort();
                     for &(var, val) in &vars {
                         if val != C::ZERO {
-                            sub_insts.push(Instr::Add { val, dst: var });
+                            sub_insts.push(Instr::add(var, val));
                         }
                     }
                     let (shift, moved, insts, buff) = stack.last_mut().unwrap();
-                    if sub_insts.len() == 1
-                        && matches!(sub_insts[0], Instr::Add{val:c, dst:0} if c.is_odd())
+                    if !sub_moved
+                        && sub_shift == *shift
+                        && sub_insts.len() == 1
+                        && matches!(&sub_insts[0],
+                            Instr::Calc { calcs } if calcs.len() == 1 && calcs[0].0 == *shift
+                                && matches!(calcs[0].1.const_inc_of(*shift),
+                                    Some(inc) if inc.is_odd()))
                     {
-                        insts.push(Instr::Load {
-                            val: C::ZERO,
-                            dst: *shift,
-                        });
+                        insts.push(Instr::load(*shift, C::ZERO));
                         buff.insert(*shift, C::ZERO);
                     } else {
-                        let block_id = blocks.len();
-                        let block_id = *blocks
-                            .entry(Block {
-                                shift: sub_shift,
-                                insts: sub_insts,
-                            })
-                            .or_insert(block_id);
                         for (var, _) in vars {
-                            let v = buff.entry(*shift + var).or_insert(C::ZERO);
+                            let v = buff.entry(var).or_insert(C::ZERO);
                             if *v != C::ZERO {
-                                insts.push(Instr::Add {
-                                    val: *v,
-                                    dst: *shift + var,
-                                });
+                                insts.push(Instr::add(var, *v));
                                 *v = C::ZERO;
                             }
                         }
-                        if sub_moved || sub_shift != 0 {
+                        if sub_moved || sub_shift != *shift {
                             let mut vars = buff.iter_mut().collect::<Vec<_>>();
                             vars.sort();
                             for (var, val) in vars {
                                 if *val != C::ZERO {
-                                    insts.push(Instr::Add {
-                                        val: *val,
-                                        dst: *var,
-                                    });
+                                    insts.push(Instr::add(*var, *val));
                                     *val = C::ZERO;
                                 }
                             }
@@ -174,15 +389,15 @@ impl<C: CellType> Program<C> {
                         }
                         let val = buff.entry(*shift).or_insert(C::ZERO);
                         if *val != C::ZERO {
-                            insts.push(Instr::Add {
-                                val: *val,
-                                dst: *shift,
-                            });
+                            insts.push(Instr::add(*shift, *val));
                             *val = C::ZERO;
                         }
                         insts.push(Instr::Loop {
                             cond: *shift,
-                            block: block_id,
+                            block: Block {
+                                shift: sub_shift - *shift,
+                                insts: sub_insts,
+                            },
                         });
                     }
                 }
@@ -201,39 +416,41 @@ impl<C: CellType> Program<C> {
         vars.sort();
         for (var, val) in vars {
             if val != C::ZERO {
-                insts.push(Instr::Add { val, dst: var });
+                insts.push(Instr::add(var, val));
             }
         }
-        let block_id = blocks.len();
-        blocks.insert(Block { shift, insts }, block_id);
-        let mut program = Program {
-            entry: block_id,
-            blocks: vec![
-                Block {
-                    shift: 0,
-                    insts: Vec::new()
-                };
-                blocks.len()
-            ],
-        };
-        for (block, idx) in blocks {
-            program.blocks[idx] = block;
-        }
-        return Ok(program);
+        return Ok(Block { shift, insts });
     }
 }
 
-impl<C: CellType> Program<C> {
+impl<C: CellType> Debug for Expr<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.parts.is_empty() {
+            write!(f, "0")?;
+        }
+        for (i, part) in self.parts.iter().enumerate() {
+            if i != 0 {
+                write!(f, " + ")?;
+            }
+            if part.coef != C::ONE || part.vars.is_empty() {
+                write!(f, "{:?}", part.coef)?;
+            }
+            for (j, var) in part.vars.iter().enumerate() {
+                if j != 0 || part.coef != C::ONE || part.vars.is_empty() {
+                    write!(f, "*")?;
+                }
+                write!(f, "[{var}]")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<C: CellType> Block<C> {
     /// Pretty print the block with the given `block_id` and indented by `indent`
     /// spaces into the formatter `f`. Referenced blocks are printed recursively.
-    fn print_block(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        block_id: usize,
-        indent: usize,
-    ) -> fmt::Result {
-        let block = &self.blocks[block_id];
-        for instr in &block.insts {
+    fn print_block(&self, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt::Result {
+        for instr in &self.insts {
             match instr {
                 Instr::Output { src } => {
                     writeln!(f, "{:indent$}output [{}]", "", src, indent = indent)?;
@@ -241,37 +458,34 @@ impl<C: CellType> Program<C> {
                 Instr::Input { dst } => {
                     writeln!(f, "{:indent$}input [{}]", "", dst, indent = indent)?;
                 }
-                Instr::Load { val, dst } => {
-                    writeln!(f, "{:indent$}[{}] = {:?}", "", dst, val, indent = indent)?;
-                }
-                Instr::Add { val, dst } => {
-                    writeln!(f, "{:indent$}[{}] += {:?}", "", dst, val, indent = indent)?;
-                }
-                Instr::MulAdd { val, src, dst } => {
-                    writeln!(
-                        f,
-                        "{:indent$}[{}] += {:?} * [{}]",
-                        "",
-                        dst,
-                        val,
-                        src,
-                        indent = indent
-                    )?;
+                Instr::Calc { calcs } => {
+                    let mut indent = indent;
+                    if calcs.len() != 1 {
+                        writeln!(f, "{:indent$}(", "", indent = indent)?;
+                        indent += 2;
+                    }
+                    for (dst, val) in calcs {
+                        writeln!(f, "{:indent$}[{}] = {val:?}", "", dst, indent = indent)?;
+                    }
+                    if calcs.len() != 1 {
+                        indent -= 2;
+                        writeln!(f, "{:indent$})", "", indent = indent)?;
+                    }
                 }
                 Instr::Loop { cond, block } => {
-                    writeln!(f, "{:indent$}loop [{}] [", "", cond, indent = indent)?;
-                    self.print_block(f, *block, indent + 2)?;
-                    writeln!(f, "{:indent$}]", "", indent = indent)?;
+                    writeln!(f, "{:indent$}loop [{}] {{", "", cond, indent = indent)?;
+                    block.print_block(f, indent + 2)?;
+                    writeln!(f, "{:indent$}}}", "", indent = indent)?;
                 }
                 Instr::If { cond, block } => {
-                    writeln!(f, "{:indent$}if [{}] [", "", cond, indent = indent)?;
-                    self.print_block(f, *block, indent + 2)?;
-                    writeln!(f, "{:indent$}]", "", indent = indent)?;
+                    writeln!(f, "{:indent$}if [{}] {{", "", cond, indent = indent)?;
+                    block.print_block(f, indent + 2)?;
+                    writeln!(f, "{:indent$}}}", "", indent = indent)?;
                 }
             }
         }
-        if block.shift != 0 {
-            writeln!(f, "{:indent$}move {}", "", block.shift, indent = indent)?;
+        if self.shift != 0 {
+            writeln!(f, "{:indent$}move {}", "", self.shift, indent = indent)?;
         }
         Ok(())
     }
@@ -279,7 +493,7 @@ impl<C: CellType> Program<C> {
 
 impl<C: CellType> Debug for Program<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.print_block(f, self.entry, 0)
+        self.print_block(f, 0)
     }
 }
 
@@ -294,21 +508,21 @@ mod tests {
         assert_eq!(
             prog,
             Program {
-                entry: 1,
-                blocks: vec![
-                    Block {
-                        shift: 0,
-                        insts: vec![
-                            Load { val: 0, dst: 1 },
-                            Input { dst: 1 },
-                            Output { src: 1 },
-                            Add { val: 254, dst: 0 }
-                        ]
-                    },
-                    Block {
-                        shift: 0,
-                        insts: vec![Add { val: 5, dst: 0 }, Loop { cond: 0, block: 0 }]
-                    },
+                shift: 0,
+                insts: vec![
+                    Instr::add(0, 5),
+                    Loop {
+                        cond: 0,
+                        block: Block {
+                            shift: 0,
+                            insts: vec![
+                                Instr::load(1, 0),
+                                Input { dst: 1 },
+                                Output { src: 1 },
+                                Instr::add(0, 254),
+                            ]
+                        }
+                    }
                 ]
             }
         );

@@ -1,6 +1,5 @@
 //! Library for executing Brainfuck programs.
 
-mod analy;
 mod exec;
 mod ir;
 mod opt;
@@ -9,7 +8,7 @@ mod runtime;
 use std::{fmt::Debug, hash::Hash};
 
 pub use exec::{BaseInterpreter, Executor, InplaceInterpreter};
-pub use ir::{Block, Instr, Program};
+pub use ir::{Block, Expr, Instr, Program};
 pub use runtime::{Context, Memory};
 
 /// Kind of error that might be encountered during the parsing of a Brainfuck
