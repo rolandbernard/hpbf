@@ -214,6 +214,16 @@ impl<C: CellType> Expr<C> {
         }
     }
 
+    /// If this expression is the identity of a single variable, return the
+    /// number of that variable, otherwise return [`None`].
+    pub fn identity(&self) -> Option<isize> {
+        if self.parts.len() == 1 && self.parts[0].coef == C::ZERO && self.parts[0].vars.len() == 1 {
+            Some(self.parts[0].vars[0])
+        } else {
+            None
+        }
+    }
+
     /// Evaluate the expression by taking getting variable values from the
     /// provided function.
     pub fn evaluate<F: Fn(isize) -> C>(&self, func: F) -> C {
@@ -231,19 +241,24 @@ impl<C: CellType> Expr<C> {
     /// Evaluate the expression by taking getting variable values from the
     /// provided function. This differs from [`Self::evaluate`] in that the
     /// values returned for the variables are in turn expressions.
-    pub fn symb_evaluate<'a, F>(&'a self, func: F) -> Option<Self>
+    pub fn symb_evaluate<F>(&self, func: F) -> Option<Self>
     where
-        F: Fn(isize) -> Option<&'a Self>,
+        F: Fn(isize) -> Option<Self>,
     {
         let mut val = Expr::val(C::ZERO);
         for part in &self.parts {
             let mut part_val = Expr::val(part.coef);
             for &var in &part.vars {
-                part_val = part_val.mul(func(var)?);
+                part_val = part_val.mul(&func(var)?);
             }
             val = val.add(&part_val);
         }
         return Some(val);
+    }
+
+    /// Return an iterator over all the variables used in this expression.
+    pub fn variables<'a>(&'a self) -> impl Iterator<Item = isize> + 'a {
+        self.parts.iter().flat_map(|part| part.vars.iter()).copied()
     }
 }
 
@@ -280,7 +295,7 @@ impl<C: CellType> Program<C> {
     ///         shift: 1,
     ///         insts: vec![
     ///             Instr::add(0, 1),
-    ///             Loop { cond: 0, block: Block { 
+    ///             Loop { cond: 0, block: Block {
     ///                 shift: -1,
     ///                 insts: vec![
     ///                     Instr::add(0, 254),
