@@ -156,12 +156,14 @@ impl<C: CellType> Expr<C> {
     /// let expr = Expr::<u8>::var(0).add(&Expr::<u8>::val(5));
     /// assert_eq!(expr.inc_of(0), Some(Expr::val(5)));
     /// assert_eq!(expr.inc_of(1), None);
+    /// let expr = Expr::<u8>::var(0).mul(&Expr::<u8>::val(5));
+    /// assert_eq!(expr.inc_of(0), None);
     /// ```
     pub fn inc_of(&self, var: isize) -> Option<Expr<C>> {
         if self
             .parts
             .iter()
-            .any(|part| part.vars.len() == 1 && part.vars[0] == var)
+            .any(|part| part.vars.len() == 1 && part.vars[0] == var && part.coef == C::ONE)
             && self
                 .parts
                 .iter()
@@ -191,12 +193,14 @@ impl<C: CellType> Expr<C> {
     /// assert_eq!(expr.const_inc_of(0), Some(5));
     /// let expr = Expr::<u8>::var(0).add(&Expr::<u8>::var(5));
     /// assert_eq!(expr.const_inc_of(0), None);
+    /// let expr = Expr::<u8>::var(0).mul(&Expr::<u8>::val(5));
+    /// assert_eq!(expr.const_inc_of(0), None);
     /// ```
     pub fn const_inc_of(&self, var: isize) -> Option<C> {
         if self
             .parts
             .iter()
-            .any(|part| part.vars.len() == 1 && part.vars[0] == var)
+            .any(|part| part.vars.len() == 1 && part.vars[0] == var && part.coef == C::ONE)
             && self
                 .parts
                 .iter()
@@ -211,6 +215,35 @@ impl<C: CellType> Expr<C> {
             return Some(C::ZERO);
         } else {
             return None;
+        }
+    }
+
+    /// If this expression is a simple product of the variable `var` with some other
+    /// expression, return that expression.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hpbf::{Expr};
+    /// let expr = Expr::<u8>::var(0).mul(&Expr::<u8>::val(5));
+    /// assert_eq!(expr.prod_of(0), Some(Expr::val(5)));
+    /// assert_eq!(expr.prod_of(1), None);
+    /// let expr = Expr::<u8>::var(0).add(&Expr::<u8>::val(5));
+    /// assert_eq!(expr.prod_of(0), None);
+    /// ```
+    pub fn prod_of(&self, var: isize) -> Option<Expr<C>> {
+        if self.parts.iter().all(|part| part.vars.contains(&var)) {
+            Some(Expr {
+                parts: self
+                    .parts
+                    .iter()
+                    .map(|part| ExprPart {
+                        coef: part.coef,
+                        vars: part.vars.iter().copied().filter(|&v| v != var).collect(),
+                    })
+                    .collect(),
+            })
+        } else {
+            None
         }
     }
 
@@ -448,7 +481,11 @@ impl<C: CellType> Debug for Expr<C> {
                 write!(f, " + ")?;
             }
             if part.coef != C::ONE || part.vars.is_empty() {
-                write!(f, "{:?}", part.coef)?;
+                if part.coef.wrapping_neg() < part.coef {
+                    write!(f, "-{:?}", part.coef.wrapping_neg())?;
+                } else {
+                    write!(f, "{:?}", part.coef)?;
+                }
             }
             for (j, var) in part.vars.iter().enumerate() {
                 if j != 0 || part.coef != C::ONE || part.vars.is_empty() {
@@ -480,7 +517,13 @@ impl<C: CellType> Block<C> {
                         indent += 2;
                     }
                     for (dst, val) in calcs {
-                        writeln!(f, "{:indent$}[{}] = {val:?}", "", dst, indent = indent)?;
+                        if let Some(inc) = val.inc_of(*dst) {
+                            writeln!(f, "{:indent$}[{}] += {inc:?}", "", dst, indent = indent)?;
+                        } else if let Some(mul) = val.prod_of(*dst) {
+                            writeln!(f, "{:indent$}[{}] *= {mul:?}", "", dst, indent = indent)?;
+                        } else {
+                            writeln!(f, "{:indent$}[{}] = {val:?}", "", dst, indent = indent)?;
+                        }
                     }
                     if calcs.len() != 1 {
                         indent -= 2;
