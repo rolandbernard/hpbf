@@ -89,6 +89,29 @@ pub trait CellType: Copy + Ord + Hash + Debug {
         return result;
     }
 
+    /// Compute the multiplicative inverse of `self`. Unlike [`Self::wrapping_div`],
+    /// this never works when `self` is even.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hpbf::CellType;
+    /// assert_eq!(<u8 as CellType>::wrapping_inv(5), Some(205));
+    /// assert_eq!(<u8 as CellType>::wrapping_inv(1), Some(1));
+    /// assert_eq!(<u8 as CellType>::wrapping_inv(7), Some(183));
+    /// assert_eq!(<u8 as CellType>::wrapping_inv(2), None);
+    /// assert_eq!(<u8 as CellType>::wrapping_inv(4), None);
+    /// assert_eq!(<u8 as CellType>::wrapping_inv(64), None);
+    /// ```
+    fn wrapping_inv(self) -> Option<Self> {
+        if self.is_odd() {
+            let tot = Self::ONE.wrapping_shl(Self::BITS - 1);
+            let inv = self.wrapping_pow(tot.wrapping_add(Self::NEG_ONE));
+            Some(inv)
+        } else {
+            None
+        }
+    }
+
     /// Compute the smallest value `x` such that `x.wrapping_mul(other) == self`.
     /// It should be noted that the semantics of this are very different from
     /// the standard `wrapping_div` that Rust provides for integer types.
