@@ -197,24 +197,21 @@ impl<C: CellType> Expr<C> {
     /// assert_eq!(expr.const_inc_of(0), None);
     /// ```
     pub fn const_inc_of(&self, var: isize) -> Option<C> {
-        if self
-            .parts
-            .iter()
-            .any(|part| part.vars.len() == 1 && part.vars[0] == var && part.coef == C::ONE)
-            && self
-                .parts
-                .iter()
-                .filter(|part| part.vars.len() != 1 || part.vars[0] != var)
-                .all(|part| part.vars.is_empty())
+        if self.parts.len() == 1
+            && self.parts[0].coef == C::ONE
+            && self.parts[0].vars.len() == 1
+            && self.parts[0].vars[0] == var
         {
-            for part in &self.parts {
-                if part.vars.is_empty() {
-                    return Some(part.coef);
-                }
-            }
-            return Some(C::ZERO);
+            Some(C::ZERO)
+        } else if self.parts.len() == 2
+            && self.parts[0].vars.is_empty()
+            && self.parts[1].coef == C::ONE
+            && self.parts[1].vars.len() == 1
+            && self.parts[1].vars[0] == var
+        {
+            Some(self.parts[0].coef)
         } else {
-            return None;
+            None
         }
     }
 
@@ -247,10 +244,35 @@ impl<C: CellType> Expr<C> {
         }
     }
 
+    /// Combination of [`Self::prod_of`] and [`Self::constant`].
+    ///
+    /// # Examples
+    /// ```
+    /// # use hpbf::{Expr};
+    /// let expr = Expr::<u8>::val(5);
+    /// assert_eq!(expr.const_prod_of(0), None);
+    /// let expr = Expr::<u8>::var(0).mul(&Expr::<u8>::val(5));
+    /// assert_eq!(expr.const_prod_of(0), Some(5));
+    /// let expr = Expr::<u8>::var(0).mul(&Expr::<u8>::var(5));
+    /// assert_eq!(expr.const_prod_of(0), None);
+    /// ```
+    pub fn const_prod_of(&self, var: isize) -> Option<C> {
+        if self.parts.is_empty() {
+            Some(C::ZERO)
+        } else if self.parts.len() == 1
+            && self.parts[0].vars.len() == 1
+            && self.parts[0].vars[0] == var
+        {
+            Some(self.parts[0].coef)
+        } else {
+            None
+        }
+    }
+
     /// If this expression is the identity of a single variable, return the
     /// number of that variable, otherwise return [`None`].
     pub fn identity(&self) -> Option<isize> {
-        if self.parts.len() == 1 && self.parts[0].coef == C::ZERO && self.parts[0].vars.len() == 1 {
+        if self.parts.len() == 1 && self.parts[0].coef == C::ONE && self.parts[0].vars.len() == 1 {
             Some(self.parts[0].vars[0])
         } else {
             None
@@ -517,7 +539,9 @@ impl<C: CellType> Block<C> {
                         indent += 2;
                     }
                     for (dst, val) in calcs {
-                        if let Some(inc) = val.inc_of(*dst) {
+                        if let Some(c) = val.constant() {
+                            writeln!(f, "{:indent$}[{}] = {c:?}", "", dst, indent = indent)?;
+                        } else if let Some(inc) = val.inc_of(*dst) {
                             writeln!(f, "{:indent$}[{}] += {inc:?}", "", dst, indent = indent)?;
                         } else if let Some(mul) = val.prod_of(*dst) {
                             writeln!(f, "{:indent$}[{}] *= {mul:?}", "", dst, indent = indent)?;

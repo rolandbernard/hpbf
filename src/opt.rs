@@ -6,6 +6,7 @@ use crate::{Block, CellType, Expr, Instr, Program};
 /// their effect, and all the pending operations.
 struct OptRebuild<C: CellType> {
     shift: isize,
+    cond: Option<isize>,
     sub_shift: bool,
     no_return: bool,
     reads: HashSet<isize>,
@@ -76,44 +77,34 @@ impl<C: CellType> OptLoop<C> {
         }
     }
 
-    /// The loop runs at least once, put possibly more often.
-    fn at_least_once() -> Self {
-        OptLoop {
-            never: false,
-            finite: false,
-            no_effect: false,
-            no_return: false,
-            no_continue: false,
-            at_least_once: true,
-            at_most_once: false,
-            expr: None,
-        }
-    }
-
     /// The loop runs at most once, put possibly never.
-    fn at_most_once() -> Self {
-        OptLoop {
-            never: false,
-            finite: true,
-            no_effect: false,
-            no_return: false,
-            no_continue: false,
-            at_least_once: false,
-            at_most_once: true,
-            expr: None,
+    fn at_most_once(at_least_once: bool) -> Self {
+        if at_least_once {
+            Self::expr(Expr::val(C::ONE))
+        } else {
+            OptLoop {
+                never: false,
+                finite: true,
+                no_effect: false,
+                no_return: false,
+                no_continue: false,
+                at_least_once: false,
+                at_most_once: true,
+                expr: None,
+            }
         }
     }
 
     /// We are unable to analyze the loop. This is the most conservative estimate
     /// that must always be sound to use, regardless of the loop.
-    fn unknown() -> Self {
+    fn unknown(at_least_once: bool) -> Self {
         OptLoop {
             never: false,
             finite: false,
             no_effect: false,
             no_return: false,
             no_continue: false,
-            at_least_once: false,
+            at_least_once,
             at_most_once: false,
             expr: None,
         }
@@ -225,6 +216,20 @@ impl<C: CellType> OptRebuild<C> {
         }
     }
 
+    /// Returns true if the value of `var` is known to be non-zero.
+    fn is_non_zero(&self, var: isize) -> bool {
+        if let Some(c) = self.get_constant(var) {
+            c != C::ZERO
+        } else if !self.sub_shift
+            && !self.pending.contains_key(&var)
+            && !self.written.contains_key(&var)
+        {
+            self.cond == Some(var)
+        } else {
+            false
+        }
+    }
+
     /// Perform the calculations `calcs`, offset by `shift`, at the same time on
     /// the current state. This will not emit any instructions, but only add
     /// the necessary pending operations.
@@ -300,24 +305,38 @@ impl<C: CellType> OptRebuild<C> {
         return comps;
     }
 
+    /// Record the execution of the given operations.
+    fn written_calcs<'a>(&mut self, calcs: impl Iterator<Item = (isize, Option<&'a Expr<C>>)>)
+    where
+        C: 'a,
+    {
+        let mut knowns = Vec::new();
+        for (var, calc) in calcs {
+            if let Some(calc) = calc {
+                knowns.push((var, calc.symb_evaluate(|i| self.get_written(i))));
+            } else {
+                knowns.push((var, None));
+            }
+        }
+        for (var, known) in knowns {
+            self.remove_pending(var);
+            self.insert_written(var, known)
+        }
+    }
+
     /// Emit pending operations in the order and grouping specified in `to_emit`.
     fn emit_structured(&mut self, to_emit: Vec<Vec<isize>>) {
         for vars in to_emit {
             let mut calcs = Vec::with_capacity(vars.len());
-            let mut knowns = Vec::with_capacity(vars.len());
             for var in vars {
                 if let Some(calc) = self.remove_pending(var) {
                     for referenced in calc.variables() {
                         self.read(referenced);
                     }
-                    let known = calc.symb_evaluate(|i| self.get_written(i));
                     calcs.push((var, calc));
-                    knowns.push((var, known));
                 }
             }
-            for (var, known) in knowns {
-                self.insert_written(var, known)
-            }
+            self.written_calcs(calcs.iter().map(|(i, v)| (*i, Some(v))));
             self.insts.push(Instr::Calc { calcs });
         }
     }
@@ -354,16 +373,16 @@ impl<C: CellType> OptRebuild<C> {
         }
     }
 
-    /// Get a sorted list of all variables which have been written by this block.
-    fn written(&self) -> Vec<isize> {
-        let mut vars = self.written.keys().copied().collect::<Vec<_>>();
+    /// Get a sorted list of all variables with pending operations.
+    fn pending(&self) -> Vec<isize> {
+        let mut vars = self.pending.keys().copied().collect::<Vec<_>>();
         vars.sort();
         return vars;
     }
 
-    /// Get a sorted list of all variables with pending operations.
-    fn pending(&self) -> Vec<isize> {
-        let mut vars = self.pending.keys().copied().collect::<Vec<_>>();
+    /// Get a sorted list of all variables which have been written by this block.
+    fn writes(&self) -> Vec<isize> {
+        let mut vars = self.written.keys().copied().collect::<Vec<_>>();
         vars.sort();
         return vars;
     }
@@ -375,67 +394,86 @@ impl<C: CellType> OptRebuild<C> {
         return vars;
     }
 
+    /// Get a sorted list of all variables which have been read by this block, or
+    /// for which there are operations pending that would read the variable if
+    /// these operations will be emitted. Note that this ignores reads for pending
+    /// operations that are reading the variable being assigned by the operation.
+    fn possible_reads(&self) -> Vec<isize> {
+        let mut vars = self
+            .reads
+            .iter()
+            .copied()
+            .chain(
+                self.pending
+                    .iter()
+                    .flat_map(|(&k, vs)| vs.variables().filter(move |&v| v != k)),
+            )
+            .collect::<Vec<_>>();
+        vars.sort();
+        return vars;
+    }
+
+    /// Return true if the values of the two expressions are always the same if
+    /// evaluated given the current state. If equivalence is not guaranteed,
+    /// false will be returned.
+    fn compare(&self, a: Expr<C>, b: Expr<C>) -> bool {
+        if a == b {
+            return true;
+        }
+        let a = a.symb_evaluate(|i| Some(self.get_pending(i))).unwrap();
+        let b = b.symb_evaluate(|i| Some(self.get_pending(i))).unwrap();
+        if a == b {
+            return true;
+        }
+        let a = a.symb_evaluate(|i| self.get_written(i));
+        let b = b.symb_evaluate(|i| self.get_written(i));
+        if a.is_some() && a == b {
+            return true;
+        }
+        return false;
+    }
+
     /// Analyze how often the loop with the given state will be executed given
     /// it is run with the current written and pending operations in mind.
     fn analyze_loop(&self, sub: &Self, cond: isize, is_loop: bool) -> OptLoop<C> {
-        if let Some(initial_cond) = self.get_constant(cond) {
-            if initial_cond == C::ZERO {
-                OptLoop::expr(Expr::val(C::ZERO))
-            } else if sub.no_return {
-                OptLoop::no_return(true)
-            } else if !is_loop {
-                OptLoop::expr(Expr::val(C::ONE))
-            } else if let Some(stored_cond) = sub.get_constant(cond + sub.shift) {
-                if stored_cond == C::ZERO {
-                    OptLoop::expr(Expr::val(C::ONE))
-                } else {
-                    OptLoop::infinite(true)
-                }
-            } else if sub.sub_shift {
-                OptLoop::at_least_once()
-            } else if let Some(expr) = sub.get(cond + sub.shift) {
-                if let Some(inc) = expr.const_inc_of(cond) {
-                    if let Some(n) = initial_cond.wrapping_div(inc.wrapping_neg()) {
+        let initial_cond = self.get_constant(cond);
+        let at_least_once = self.is_non_zero(cond);
+        if initial_cond == Some(C::ZERO) {
+            OptLoop::expr(Expr::val(C::ZERO))
+        } else if sub.no_return {
+            OptLoop::no_return(at_least_once)
+        } else if !is_loop {
+            OptLoop::at_most_once(at_least_once)
+        } else if let Some(stored_cond) = sub.get_constant(cond + sub.shift) {
+            if stored_cond == C::ZERO {
+                OptLoop::at_most_once(at_least_once)
+            } else {
+                OptLoop::infinite(at_least_once)
+            }
+        } else if sub.sub_shift {
+            OptLoop::unknown(at_least_once)
+        } else if let Some(expr) = sub.get(cond + sub.shift) {
+            if let Some(inc) = expr.const_inc_of(cond) {
+                if let Some(m) = initial_cond {
+                    if let Some(n) = m.wrapping_div(inc.wrapping_neg()) {
                         OptLoop::expr(Expr::val(n))
                     } else {
-                        OptLoop::infinite(true)
+                        OptLoop::infinite(at_least_once)
                     }
-                } else if expr.identity() == Some(cond) {
-                    OptLoop::infinite(true)
                 } else {
-                    OptLoop::at_least_once()
-                }
-            } else {
-                OptLoop::at_least_once()
-            }
-        } else {
-            if sub.no_return {
-                OptLoop::no_return(false)
-            } else if !is_loop {
-                OptLoop::at_most_once()
-            } else if let Some(stored_cond) = sub.get_constant(cond + sub.shift) {
-                if stored_cond == C::ZERO {
-                    OptLoop::at_most_once()
-                } else {
-                    OptLoop::infinite(false)
-                }
-            } else if sub.sub_shift {
-                OptLoop::unknown()
-            } else if let Some(expr) = sub.get(cond + sub.shift) {
-                if let Some(inc) = expr.const_inc_of(cond) {
                     if let Some(inv) = inc.wrapping_neg().wrapping_inv() {
                         OptLoop::expr(Expr::val(inv).mul(&Expr::var(cond)))
                     } else {
-                        OptLoop::infinite(false)
+                        OptLoop::unknown(at_least_once)
                     }
-                } else if expr.identity() == Some(cond) {
-                    OptLoop::infinite(false)
-                } else {
-                    OptLoop::unknown()
                 }
+            } else if expr.identity() == Some(cond) {
+                OptLoop::infinite(at_least_once)
             } else {
-                OptLoop::unknown()
+                OptLoop::unknown(at_least_once)
             }
+        } else {
+            OptLoop::unknown(at_least_once)
         }
     }
 }
@@ -443,9 +481,10 @@ impl<C: CellType> OptRebuild<C> {
 impl<C: CellType> OptRebuild<C> {
     /// Perform the rebuilding steps with the given `block` and `shift` and return
     /// the state after the block, without emitting the final pending operations.
-    fn rebuild_block(block: &Block<C>, shift: isize) -> Self {
+    fn rebuild_block(block: &Block<C>, shift: isize, cond: Option<isize>) -> Self {
         let mut state = OptRebuild {
             shift,
+            cond,
             sub_shift: false,
             no_return: false,
             reads: HashSet::new(),
@@ -473,38 +512,61 @@ impl<C: CellType> OptRebuild<C> {
                 Instr::Loop { cond, block } | Instr::If { cond, block } => {
                     let cond = *cond + state.shift;
                     let is_loop = matches!(instr, Instr::Loop { .. });
-                    let mut sub_state = OptRebuild::rebuild_block(block, state.shift);
+                    let mut sub_state = OptRebuild::rebuild_block(block, state.shift, Some(cond));
                     let loop_anal = state.analyze_loop(&sub_state, cond, is_loop);
                     if !loop_anal.never {
-                        for var in sub_state.pending() {
-                            sub_state.emit(var);
-                        }
-                        if sub_state.sub_shift || sub_state.shift != state.shift {
-                            for var in state.pending() {
-                                state.emit(var);
+                        if loop_anal.at_least_once && loop_anal.at_most_once {
+                            if sub_state.sub_shift || sub_state.shift != state.shift {
+                                for var in state.pending() {
+                                    state.emit(var);
+                                }
+                                state.uncertain_shift();
+                            } else {
+                                for var in sub_state.reads() {
+                                    state.emit(var);
+                                    state.read(var);
+                                }
                             }
-                            state.uncertain_shift();
+                            state.insts.append(&mut sub_state.insts);
+                            state.written_calcs(
+                                sub_state.written.iter().map(|(i, v)| (*i, v.as_ref())),
+                            );
+                            state.perform_all(
+                                state.shift,
+                                &sub_state.pending.into_iter().collect::<Vec<_>>(),
+                            );
+                            state.shift = sub_state.shift;
                         } else {
-                            sub_state.reads.insert(cond);
-                            let sub_reads = sub_state.reads();
-                            for var in sub_reads {
-                                state.emit(var);
-                                state.read(var);
+                            for var in sub_state.pending() {
+                                sub_state.emit(var);
                             }
-                            let sub_written = sub_state.written();
-                            for var in sub_written {
-                                state.emit(var);
-                                state.clobber(var);
+                            if sub_state.sub_shift || sub_state.shift != state.shift {
+                                for var in state.pending() {
+                                    state.emit(var);
+                                }
+                                state.uncertain_shift();
+                            } else {
+                                sub_state.reads.insert(cond);
+                                let sub_reads = sub_state.reads();
+                                for var in sub_reads {
+                                    state.emit(var);
+                                    state.read(var);
+                                }
+                                let sub_written = sub_state.writes();
+                                for var in sub_written {
+                                    state.emit(var);
+                                    state.clobber(var);
+                                }
                             }
-                        }
-                        let block = Block {
-                            shift: sub_state.shift - state.shift,
-                            insts: sub_state.insts,
-                        };
-                        if is_loop {
-                            state.insts.push(Instr::Loop { cond, block });
-                        } else {
-                            state.insts.push(Instr::If { cond, block });
+                            let block = Block {
+                                shift: sub_state.shift - state.shift,
+                                insts: sub_state.insts,
+                            };
+                            if is_loop {
+                                state.insts.push(Instr::Loop { cond, block });
+                            } else {
+                                state.insts.push(Instr::If { cond, block });
+                            }
                         }
                     }
                 }
@@ -518,7 +580,7 @@ impl<C: CellType> OptRebuild<C> {
 impl<C: CellType> Program<C> {
     /// Optimize the program, and return the optimized copy of the program.
     pub fn optimize(&self) -> Self {
-        let mut state = OptRebuild::rebuild_block(self, 0);
+        let mut state = OptRebuild::rebuild_block(self, 0, None);
         for var in state.pending() {
             state.emit(var);
         }
