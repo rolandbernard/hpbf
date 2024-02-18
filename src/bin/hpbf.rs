@@ -4,6 +4,7 @@ use std::{env, fs::File, io::Read, process::exit};
 
 use hpbf::{BaseInterpreter, CellType, Context, Error, ErrorKind, Executor, InplaceInterpreter};
 
+/// The kind of executor to use.
 enum ExecutorKind {
     Inplace,
     BaseInt,

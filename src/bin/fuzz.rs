@@ -1,9 +1,9 @@
 use std::{
     collections::{hash_map::RandomState, HashMap, HashSet},
     env, fs,
-    hash::{BuildHasher, Hasher},
+    hash::{BuildHasher, DefaultHasher, Hash, Hasher},
     path::Path,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 
 use hpbf::{BaseInterpreter, CellType, Context, Executor, InplaceInterpreter};
@@ -185,11 +185,134 @@ fn check_code<'code>(code: &'code str) -> bool {
     if inplace != baseint {
         return false;
     }
-    let baseint_opt3 = result_with::<u8, BaseInterpreter<u8>>(code, false, 3);
-    if inplace != baseint_opt3 {
+    let baseint = result_with::<u8, BaseInterpreter<u8>>(code, false, 3);
+    if inplace != baseint {
         return false;
     }
     return true;
+}
+
+/// Code is "safe" if there is a finite amount of operations executed between
+/// each IO operation.
+fn is_safe(code: &str) -> bool {
+    let mut stack = vec![GenState::new(Some(0))];
+    for inst in code.chars() {
+        let state = stack.last_mut().unwrap();
+        match inst {
+            '+' => {
+                if let Some(v) = state.known_loads.get_mut(&state.shift) {
+                    *v = v.wrapping_add(1);
+                } else if !state.written.contains(&state.shift) {
+                    let v = state.known_adds.entry(state.shift).or_insert(0);
+                    *v = v.wrapping_add(1);
+                }
+            }
+            '-' => {
+                if let Some(v) = state.known_loads.get_mut(&state.shift) {
+                    *v = v.wrapping_sub(1);
+                } else if !state.written.contains(&state.shift) {
+                    let v = state.known_adds.entry(state.shift).or_insert(0);
+                    *v = v.wrapping_sub(1);
+                }
+            }
+            '<' => {
+                state.shift -= 1;
+            }
+            '>' => {
+                state.shift += 1;
+            }
+            ',' => {
+                state.written.insert(state.shift);
+                state.known_adds.remove(&state.shift);
+                state.known_loads.remove(&state.shift);
+            }
+            '.' => {
+                state.has_out = true;
+            }
+            ']' => {
+                if stack.len() > 1 {
+                    let prev_state = stack.pop().unwrap();
+                    if !prev_state.finite() && !prev_state.has_out {
+                        return false;
+                    }
+                    let state = stack.last_mut().unwrap();
+                    if prev_state.initial_cond != Some(0) {
+                        if prev_state.sub_shift || prev_state.shift != 0 {
+                            state.sub_shift = true;
+                            state.written.clear();
+                            state.known_adds.clear();
+                            state.known_loads.clear();
+                        } else {
+                            for &var in prev_state
+                                .known_adds
+                                .keys()
+                                .chain(prev_state.known_loads.keys())
+                                .chain(prev_state.written.iter())
+                            {
+                                let var = state.shift + var;
+                                state.written.insert(var);
+                                state.known_adds.remove(&var);
+                                state.known_loads.remove(&var);
+                            }
+                        }
+                        if prev_state.initial_cond.is_some() {
+                            if prev_state.has_out {
+                                state.has_out = true;
+                            }
+                            for (&var, &val) in &prev_state.known_loads {
+                                state
+                                    .known_loads
+                                    .insert(state.shift + var - prev_state.shift, val);
+                            }
+                        }
+                    }
+                }
+            }
+            '[' => {
+                let initial_cond = state.known_loads.get(&state.shift).copied();
+                stack.push(GenState::new(initial_cond));
+            }
+            _ => { /* comment */ }
+        }
+    }
+    return true;
+}
+
+/// Delete some random instructions such that the code still fails.
+fn minimize_code(hasher: &mut impl Hasher, code: String) -> String {
+    hasher.write_usize(code.len());
+    let code_bytes = code.as_bytes();
+    for i in (0..code.len())
+        .cycle()
+        .skip(hasher.finish() as usize % code.len())
+        .take(code.len())
+    {
+        if code_bytes[i] != b']' {
+            let next;
+            if code_bytes[i] == b'[' {
+                let mut end = i + 1;
+                let mut cnt = 0;
+                loop {
+                    if code_bytes[end] == b']' {
+                        if cnt == 0 {
+                            break;
+                        }
+                        cnt -= 1;
+                    } else if code_bytes[end] == b'[' {
+                        cnt += 1;
+                    }
+                    end += 1;
+                }
+                next = code[..i].to_owned() + &code[end + 1..];
+            } else {
+                next = code[..i].to_owned() + &code[i + 1..];
+            }
+            if is_safe(&next) && !check_code(&next) {
+                return minimize_code(hasher, next);
+            }
+        }
+    }
+    return code;
 }
 
 /// Print the current number of successful and failed code samples.
@@ -202,6 +325,7 @@ fn print_help_text() {
     println!("Usage: {} [option]", env::args().nth(0).unwrap());
     println!("Options:");
     println!("   --recheck          Run again all the stored failed examples");
+    println!("   --minimize file    Run the example in file and try to make it smaller");
     println!("   -d,--dir dir       Store or load failed examples in this directory");
     println!("   -m,--max-len len   Don't generate code longer that len bytes");
     println!("   -h,--help          Print this help text");
@@ -213,12 +337,16 @@ fn main() {
     let mut print_help = false;
     let mut recheck = false;
     let mut directory = "fuzz-errors".to_owned();
+    let mut minimize = None;
     let mut max_len = 64;
     let mut next_is_dir = false;
     let mut next_is_len = false;
+    let mut next_is_min = false;
     for arg in env::args().skip(1) {
         if next_is_dir {
             directory = arg;
+        } else if next_is_min {
+            minimize = Some(arg);
         } else if next_is_len {
             if let Ok(v) = arg.parse::<usize>() {
                 max_len = v;
@@ -228,6 +356,7 @@ fn main() {
         } else {
             match arg.as_str() {
                 "--recheck" => recheck = true,
+                "--minimize" => next_is_min = true,
                 "-d" | "--dir" => next_is_dir = true,
                 "-m" | "--max-len" => next_is_len = true,
                 "-h" | "-help" | "--help" => print_help = true,
@@ -237,6 +366,21 @@ fn main() {
     }
     if print_help {
         print_help_text();
+    } else if let Some(file) = minimize {
+        let dir = Path::new(&directory);
+        let content = fs::read_to_string(file).unwrap();
+        loop {
+            let random = RandomState::new();
+            let mut hasher = random.build_hasher();
+            for i in 0..100_000 {
+                hasher.write_usize(i);
+                let code = minimize_code(&mut hasher, content.clone());
+                let mut hasher = DefaultHasher::new();
+                code.hash(&mut hasher);
+                let path = dir.join(hasher.finish().to_string() + ".bf");
+                fs::write(path, code).unwrap();
+            }
+        }
     } else if recheck {
         let dir = Path::new(&directory);
         let mut last = Instant::now();
@@ -270,15 +414,10 @@ fn main() {
                     success += 1;
                 } else {
                     failure += 1;
-                    let timestamp = SystemTime::now();
-                    let path = dir.join(
-                        timestamp
-                            .duration_since(SystemTime::UNIX_EPOCH)
-                            .unwrap()
-                            .as_nanos()
-                            .to_string()
-                            + ".bf",
-                    );
+                    let code = minimize_code(&mut hasher, code);
+                    let mut hasher = DefaultHasher::new();
+                    code.hash(&mut hasher);
+                    let path = dir.join(hasher.finish().to_string() + ".bf");
                     fs::write(path, code).unwrap();
                 }
                 let now = Instant::now();
