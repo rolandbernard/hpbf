@@ -1,7 +1,7 @@
 //! Contains parsing and some optimizing transformations for a Brainfuck program.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::{self, Debug},
 };
 
@@ -180,6 +180,21 @@ impl<C: CellType> Expr<C> {
         } else {
             None
         }
+    }
+
+    /// Split this expression into parts that includes only variables in the
+    /// given set `include` and the rest.
+    pub fn split_along(&self, include: &HashSet<isize>) -> (Expr<C>, Expr<C>) {
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        for part in &self.parts {
+            if part.vars.iter().all(|v| include.contains(v)) {
+                first.push(part.clone());
+            } else {
+                second.push(part.clone());
+            }
+        }
+        (Expr { parts: first }, Expr { parts: second })
     }
 
     /// Combination of [`Self::inc_of`] and [`Self::constant`].
@@ -539,8 +554,8 @@ impl<C: CellType> Block<C> {
                         indent += 2;
                     }
                     for (dst, val) in calcs {
-                        if let Some(c) = val.constant() {
-                            writeln!(f, "{:indent$}[{}] = {c:?}", "", dst, indent = indent)?;
+                        if val.constant() == Some(C::ZERO) {
+                            writeln!(f, "{:indent$}[{}] = 0", "", dst, indent = indent)?;
                         } else if let Some(inc) = val.inc_of(*dst) {
                             writeln!(f, "{:indent$}[{}] += {inc:?}", "", dst, indent = indent)?;
                         } else if let Some(mul) = val.prod_of(*dst) {

@@ -2,6 +2,15 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{Block, CellType, Expr, Instr, Program};
 
+/// A write can either be known, unknown. A write that is not guaranteed to happen
+/// is encoded with [`OptWrite::Maybe`], while a write that is guaranteed to happen,
+/// but for which we don't know the value is encoded with [`OptWrite::Unknown`].
+enum OptWrite<C: CellType> {
+    Known(Expr<C>),
+    Unknown,
+    Maybe,
+}
+
 /// State for rebuilding a single block. Includes both the already emitted instructions,
 /// their effect, and all the pending operations.
 struct OptRebuild<C: CellType> {
@@ -10,7 +19,7 @@ struct OptRebuild<C: CellType> {
     sub_shift: bool,
     no_return: bool,
     reads: HashSet<isize>,
-    written: HashMap<isize, Option<Expr<C>>>,
+    written: HashMap<isize, OptWrite<C>>,
     insts: Vec<Instr<C>>,
     pending: HashMap<isize, Expr<C>>,
     reverse: HashMap<isize, HashSet<isize>>,
@@ -22,7 +31,6 @@ struct OptLoop<C: CellType> {
     never: bool,
     finite: bool,
     no_effect: bool,
-    no_return: bool,
     no_continue: bool,
     at_least_once: bool,
     at_most_once: bool,
@@ -36,7 +44,6 @@ impl<C: CellType> OptLoop<C> {
         OptLoop {
             never: constant == Some(C::ZERO),
             finite: true,
-            no_return: false,
             no_continue: false,
             no_effect: constant == Some(C::ZERO),
             at_least_once: matches!(constant, Some(c) if c != C::ZERO),
@@ -51,8 +58,7 @@ impl<C: CellType> OptLoop<C> {
             never: false,
             finite: true,
             no_effect: true,
-            no_return: true,
-            no_continue: true,
+            no_continue: at_least_once,
             at_least_once,
             at_most_once: true,
             expr: if at_least_once {
@@ -69,7 +75,6 @@ impl<C: CellType> OptLoop<C> {
             never: false,
             finite: false,
             no_effect: true,
-            no_return: false,
             no_continue: at_least_once,
             at_least_once,
             at_most_once: false,
@@ -86,7 +91,6 @@ impl<C: CellType> OptLoop<C> {
                 never: false,
                 finite: true,
                 no_effect: false,
-                no_return: false,
                 no_continue: false,
                 at_least_once: false,
                 at_most_once: true,
@@ -102,7 +106,6 @@ impl<C: CellType> OptLoop<C> {
             never: false,
             finite: false,
             no_effect: false,
-            no_return: false,
             no_continue: false,
             at_least_once,
             at_most_once: false,
@@ -117,10 +120,11 @@ impl<C: CellType> OptRebuild<C> {
     fn remove_pending(&mut self, var: isize) -> Option<Expr<C>> {
         if let Some(expr) = self.pending.remove(&var) {
             for v in expr.variables() {
-                let users = self.reverse.get_mut(&v).unwrap();
-                users.remove(&var);
-                if users.is_empty() {
-                    self.reverse.remove(&v);
+                if let Some(users) = self.reverse.get_mut(&v) {
+                    users.remove(&var);
+                    if users.is_empty() {
+                        self.reverse.remove(&v);
+                    }
                 }
             }
             Some(expr)
@@ -141,25 +145,16 @@ impl<C: CellType> OptRebuild<C> {
         }
     }
 
-    /// Remove an entry from the set of known cells. This really only to be used
-    /// right before inserting a new value.
-    fn remove_written(&mut self, var: isize) -> Option<Expr<C>> {
-        if let Some(Some(expr)) = self.written.insert(var, None) {
-            Some(expr)
-        } else {
-            None
-        }
-    }
-
     /// Insert a new known cell operation.
-    fn insert_written(&mut self, var: isize, val: Option<Expr<C>>) {
-        self.remove_written(var);
-        if let Some(expr) = val {
+    fn insert_written(&mut self, var: isize, val: OptWrite<C>) {
+        if let OptWrite::Known(expr) = val {
             if expr.identity() != Some(var) {
-                self.written.insert(var, Some(expr));
+                self.written.insert(var, OptWrite::Known(expr));
+            } else {
+                self.written.remove(&var);
             }
         } else {
-            self.written.insert(var, None);
+            self.written.insert(var, val);
         }
     }
 
@@ -167,8 +162,12 @@ impl<C: CellType> OptRebuild<C> {
     /// relative to the start of the block. If the result would depend on a
     /// clobbered value, return [`None`].
     fn get_written(&self, var: isize) -> Option<Expr<C>> {
-        if let Some(expr) = self.written.get(&var) {
-            expr.clone()
+        if let Some(write) = self.written.get(&var) {
+            if let OptWrite::Known(expr) = write {
+                Some(expr.clone())
+            } else {
+                None
+            }
         } else {
             Some(Expr::var(var))
         }
@@ -199,7 +198,7 @@ impl<C: CellType> OptRebuild<C> {
     /// If the variable `var` is known to have a constant value already written
     /// to it, return that value, otherwise return [`None`].
     fn get_written_constant(&self, var: isize) -> Option<C> {
-        if let Some(Some(expr)) = self.written.get(&var) {
+        if let Some(OptWrite::Known(expr)) = self.written.get(&var) {
             expr.constant()
         } else {
             None
@@ -306,20 +305,23 @@ impl<C: CellType> OptRebuild<C> {
     }
 
     /// Record the execution of the given operations.
-    fn written_calcs<'a>(&mut self, calcs: impl Iterator<Item = (isize, Option<&'a Expr<C>>)>)
+    fn written_calcs<'a>(&mut self, calcs: impl Iterator<Item = (isize, OptWrite<C>)>)
     where
         C: 'a,
     {
         let mut knowns = Vec::new();
         for (var, calc) in calcs {
-            if let Some(calc) = calc {
-                knowns.push((var, calc.symb_evaluate(|i| self.get_written(i))));
+            if let OptWrite::Known(calc) = calc {
+                if let Some(calc) = calc.symb_evaluate(|i| self.get_written(i)) {
+                    knowns.push((var, OptWrite::Known(calc)));
+                } else {
+                    knowns.push((var, OptWrite::Unknown));
+                }
             } else {
-                knowns.push((var, None));
+                knowns.push((var, calc));
             }
         }
         for (var, known) in knowns {
-            self.remove_pending(var);
             self.insert_written(var, known)
         }
     }
@@ -336,7 +338,7 @@ impl<C: CellType> OptRebuild<C> {
                     calcs.push((var, calc));
                 }
             }
-            self.written_calcs(calcs.iter().map(|(i, v)| (*i, Some(v))));
+            self.written_calcs(calcs.iter().map(|(i, v)| (*i, OptWrite::Known(v.clone()))));
             self.insts.push(Instr::Calc { calcs });
         }
     }
@@ -353,11 +355,20 @@ impl<C: CellType> OptRebuild<C> {
     /// Mark the value of the variable `var` as clobbered from now on. This also
     /// removes any pending operation for this variable and emits all pending
     /// operations that require `var`.
-    fn clobber(&mut self, var: isize) {
-        self.remove_pending(var);
+    fn clobber(&mut self, var: isize, maybe: bool) {
+        if !maybe {
+            self.remove_pending(var);
+        }
         let to_emit = self.gather_for_emit(&[var]);
         self.emit_structured(to_emit);
-        self.insert_written(var, None);
+        self.insert_written(
+            var,
+            if maybe {
+                OptWrite::Maybe
+            } else {
+                OptWrite::Unknown
+            },
+        );
     }
 
     /// After an uncertain move, all previously written are invalidated.
@@ -368,7 +379,7 @@ impl<C: CellType> OptRebuild<C> {
 
     /// Record that the given variable has been read at this time.
     fn read(&mut self, var: isize) {
-        if !self.written.contains_key(&var) {
+        if let None | Some(OptWrite::Maybe) = self.written.get(&var) {
             self.reads.insert(var);
         }
     }
@@ -394,13 +405,12 @@ impl<C: CellType> OptRebuild<C> {
         return vars;
     }
 
-    /// Get a sorted list of all variables which have been read by this block, or
+    /// Get a hash set of all variables which have been read by this block, or
     /// for which there are operations pending that would read the variable if
     /// these operations will be emitted. Note that this ignores reads for pending
     /// operations that are reading the variable being assigned by the operation.
-    fn possible_reads(&self) -> Vec<isize> {
-        let mut vars = self
-            .reads
+    fn possible_reads(&self) -> HashSet<isize> {
+        self.reads
             .iter()
             .copied()
             .chain(
@@ -408,15 +418,13 @@ impl<C: CellType> OptRebuild<C> {
                     .iter()
                     .flat_map(|(&k, vs)| vs.variables().filter(move |&v| v != k)),
             )
-            .collect::<Vec<_>>();
-        vars.sort();
-        return vars;
+            .collect()
     }
 
     /// Return true if the values of the two expressions are always the same if
     /// evaluated given the current state. If equivalence is not guaranteed,
     /// false will be returned.
-    fn compare(&self, a: Expr<C>, b: Expr<C>) -> bool {
+    fn compare(&self, a: &Expr<C>, b: &Expr<C>) -> bool {
         if a == b {
             return true;
         }
@@ -444,7 +452,7 @@ impl<C: CellType> OptRebuild<C> {
             OptLoop::no_return(at_least_once)
         } else if !is_loop {
             OptLoop::at_most_once(at_least_once)
-        } else if let Some(stored_cond) = sub.get_constant(cond + sub.shift) {
+        } else if let Some(stored_cond) = sub.get_constant(cond + sub.shift - self.shift) {
             if stored_cond == C::ZERO {
                 OptLoop::at_most_once(at_least_once)
             } else {
@@ -452,7 +460,7 @@ impl<C: CellType> OptRebuild<C> {
             }
         } else if sub.sub_shift {
             OptLoop::unknown(at_least_once)
-        } else if let Some(expr) = sub.get(cond + sub.shift) {
+        } else if let Some(expr) = sub.get(cond + sub.shift - self.shift) {
             if let Some(inc) = expr.const_inc_of(cond) {
                 if let Some(m) = initial_cond {
                     if let Some(n) = m.wrapping_div(inc.wrapping_neg()) {
@@ -463,6 +471,8 @@ impl<C: CellType> OptRebuild<C> {
                 } else {
                     if let Some(inv) = inc.wrapping_neg().wrapping_inv() {
                         OptLoop::expr(Expr::val(inv).mul(&Expr::var(cond)))
+                    } else if inc == C::ZERO {
+                        OptLoop::infinite(at_least_once)
                     } else {
                         OptLoop::unknown(at_least_once)
                     }
@@ -476,13 +486,216 @@ impl<C: CellType> OptRebuild<C> {
             OptLoop::unknown(at_least_once)
         }
     }
+
+    /// Split a pending action into an operation that runs inside the loop, and
+    /// an operation that runs before or after the loop.
+    fn loop_motion(
+        &self,
+        var: isize,
+        pending: Expr<C>,
+        complete: bool,
+        reads: &HashSet<isize>,
+        constant: &HashSet<isize>,
+        other_pending: &HashSet<isize>,
+        loop_anal: &OptLoop<C>,
+    ) -> [Option<Expr<C>>; 3] {
+        if constant.contains(&var) && complete {
+            return [None, None, None];
+        }
+        let pending = pending
+            .symb_evaluate(|i| {
+                if constant.contains(&i) {
+                    if let Some(c) = self.get_constant(i) {
+                        return Some(Expr::val(c));
+                    }
+                }
+                Some(Expr::var(i))
+            })
+            .unwrap();
+        let used_vars = pending.variables().collect::<HashSet<_>>();
+        if !reads.contains(&var) {
+            if complete {
+                if let Some(expr) = &loop_anal.expr {
+                    if let Some(inc) = pending.inc_of(var) {
+                        let (before, after) = inc.split_along(constant);
+                        return [
+                            Some(Expr::var(var).add(&before.mul(expr))),
+                            Some(Expr::var(var).add(&after)),
+                            None,
+                        ];
+                    }
+                    if let Some(c) = expr.constant() {
+                        if let Some(m) = pending.const_prod_of(var) {
+                            return [
+                                Some(Expr::val(m.wrapping_pow(c)).mul(&Expr::var(var))),
+                                None,
+                                None,
+                            ];
+                        }
+                    }
+                }
+            }
+        }
+        if !reads.contains(&var) || loop_anal.at_most_once {
+            if used_vars.iter().all(|x| !other_pending.contains(x)) {
+                return [None, None, Some(pending)];
+            }
+        }
+        return [None, Some(pending), None];
+    }
+
+    /// Inline the given `sub_state` into this state.
+    fn inline(&mut self, mut sub_state: Self) {
+        if sub_state.sub_shift {
+            for var in self.pending() {
+                self.emit(var);
+            }
+            self.uncertain_shift();
+        } else {
+            for var in sub_state.reads() {
+                self.emit(var);
+                self.read(var);
+            }
+        }
+        let mut clobbered = Vec::new();
+        for (&var, kind) in &sub_state.written {
+            if let OptWrite::Maybe = kind {
+                clobbered.push((var, true));
+            } else {
+                self.remove_pending(var);
+                clobbered.push((var, false));
+            }
+        }
+        clobbered.sort();
+        for (var, maybe) in clobbered {
+            self.clobber(var, maybe);
+        }
+        self.insts.append(&mut sub_state.insts);
+        self.written_calcs(sub_state.written.into_iter());
+        if sub_state.no_return {
+            self.no_return = true;
+        } else {
+            self.perform_all(0, &sub_state.pending.into_iter().collect::<Vec<_>>());
+            self.shift = sub_state.shift;
+        }
+    }
+
+    /// Emit a loop or if for the given `sub_state` inside this state.
+    fn loop_or_if(
+        &mut self,
+        mut sub_state: Self,
+        cond: isize,
+        is_loop: bool,
+        loop_anal: &OptLoop<C>,
+    ) {
+        if !sub_state.no_return {
+            for var in sub_state.pending() {
+                sub_state.emit(var);
+            }
+        }
+        if sub_state.sub_shift || sub_state.shift != self.shift {
+            for var in self.pending() {
+                self.emit(var);
+            }
+            self.uncertain_shift();
+        } else {
+            sub_state.reads.insert(cond);
+            let sub_reads = sub_state.reads();
+            for var in sub_reads {
+                self.emit(var);
+                self.read(var);
+            }
+            if !loop_anal.no_effect {
+                let sub_written = sub_state.writes();
+                let constants = self.constants_among(&sub_state, sub_written.iter().copied());
+                for var in sub_written {
+                    if !constants.contains(&var) {
+                        self.clobber(var, true);
+                    }
+                }
+            }
+            for (var, write) in sub_state.written {
+                if let OptWrite::Known(expr) = write {
+                    if var == cond && expr.constant() == Some(C::ZERO) {
+                        self.insert_written(cond, OptWrite::Known(Expr::val(C::ZERO)));
+                    }
+                }
+            }
+        }
+        let block = Block {
+            shift: sub_state.shift - self.shift,
+            insts: sub_state.insts,
+        };
+        if is_loop {
+            self.insts.push(Instr::Loop { cond, block });
+            self.insert_written(cond, OptWrite::Known(Expr::val(C::ZERO)));
+        } else {
+            self.insts.push(Instr::If { cond, block });
+        }
+        if loop_anal.no_continue {
+            self.no_return = true;
+        }
+    }
+
+    /// Compute which of the given variables will stay constant at every execution
+    /// of the loop, and will have the same value as at the beginning of the loop.
+    /// This does not mean that the variable does not change inside the loop,
+    /// only that at is will have the same value before the loop, after each
+    /// iteration, and at each iteration before the still pending operations.
+    fn constants_among(
+        &self,
+        sub_state: &Self,
+        vars: impl Iterator<Item = isize>,
+    ) -> HashSet<isize> {
+        let mut constant = HashSet::new();
+        let mut dependents = HashMap::new();
+        let mut depends_on = HashMap::new();
+        for var in vars {
+            let complete = sub_state.get(var);
+            let written = sub_state.get_written(var);
+            if complete.is_some() && written.is_some() {
+                let complete = complete.unwrap();
+                let written = written.unwrap();
+                if self.compare(&Expr::var(var), &complete)
+                    && self.compare(&Expr::var(var), &written)
+                {
+                    let vars = written
+                        .variables()
+                        .chain(complete.variables())
+                        .filter(|&x| x != var)
+                        .collect::<HashSet<_>>();
+                    if vars.iter().all(|x| constant.contains(x)) {
+                        constant.insert(var);
+                    } else {
+                        for &v in &vars {
+                            dependents.entry(v).or_insert(Vec::new()).push(var);
+                        }
+                        depends_on.insert(var, vars.len());
+                    }
+                }
+            }
+        }
+        let mut stack = constant.iter().copied().collect::<Vec<_>>();
+        while let Some(c) = stack.pop() {
+            if let Some(deps) = dependents.remove(&c) {
+                for dep in deps {
+                    let v = depends_on.get_mut(&dep).unwrap();
+                    *v -= 1;
+                    if *v == 0 {
+                        stack.push(dep);
+                        constant.insert(dep);
+                    }
+                }
+            }
+        }
+        return constant;
+    }
 }
 
 impl<C: CellType> OptRebuild<C> {
-    /// Perform the rebuilding steps with the given `block` and `shift` and return
-    /// the state after the block, without emitting the final pending operations.
-    fn rebuild_block(block: &Block<C>, shift: isize, cond: Option<isize>) -> Self {
-        let mut state = OptRebuild {
+    /// Create new (empty) rebuild state.
+    fn new(shift: isize, cond: Option<isize>) -> Self {
+        OptRebuild {
             shift,
             cond,
             sub_shift: false,
@@ -492,95 +705,114 @@ impl<C: CellType> OptRebuild<C> {
             insts: Vec::new(),
             pending: HashMap::new(),
             reverse: HashMap::new(),
-        };
+        }
+    }
+
+    /// Perform the rebuilding steps with the given `block` and `shift` and return
+    /// the state after the block, without emitting the final pending operations.
+    fn rebuild_block(&mut self, block: &Block<C>) {
         for instr in &block.insts {
+            if self.no_return {
+                return;
+            }
             match instr {
                 Instr::Output { src } => {
-                    let src = *src + state.shift;
-                    state.emit(src);
-                    state.read(src);
-                    state.insts.push(Instr::Output { src });
+                    let src = *src + self.shift;
+                    self.emit(src);
+                    self.read(src);
+                    self.insts.push(Instr::Output { src });
                 }
                 Instr::Input { dst } => {
-                    let dst = *dst + state.shift;
-                    state.clobber(dst);
-                    state.insts.push(Instr::Input { dst });
+                    let dst = *dst + self.shift;
+                    self.clobber(dst, false);
+                    self.insts.push(Instr::Input { dst });
                 }
                 Instr::Calc { calcs } => {
-                    state.perform_all(state.shift, calcs);
+                    self.perform_all(self.shift, calcs);
                 }
                 Instr::Loop { cond, block } | Instr::If { cond, block } => {
-                    let cond = *cond + state.shift;
+                    let cond = *cond + self.shift;
                     let is_loop = matches!(instr, Instr::Loop { .. });
-                    let mut sub_state = OptRebuild::rebuild_block(block, state.shift, Some(cond));
-                    let loop_anal = state.analyze_loop(&sub_state, cond, is_loop);
+                    let mut sub_state = OptRebuild::new(self.shift, Some(cond));
+                    sub_state.rebuild_block(block);
+                    let loop_anal = self.analyze_loop(&sub_state, cond, is_loop);
                     if !loop_anal.never {
-                        if loop_anal.at_least_once && loop_anal.at_most_once {
-                            if sub_state.sub_shift || sub_state.shift != state.shift {
-                                for var in state.pending() {
-                                    state.emit(var);
+                        let mut after = Vec::new();
+                        if !sub_state.sub_shift && sub_state.shift == self.shift {
+                            let pending = sub_state.pending();
+                            let mut possible_reads = sub_state.possible_reads();
+                            possible_reads.insert(cond);
+                            let constant = self.constants_among(
+                                &sub_state,
+                                possible_reads.iter().chain(pending.iter()).copied(),
+                            );
+                            let mut before = Vec::new();
+                            let mut to_perform = Vec::new();
+                            let pending_set = pending
+                                .iter()
+                                .copied()
+                                .filter(|x| !constant.contains(x))
+                                .collect();
+                            for var in pending {
+                                let has_written = sub_state.written.contains_key(&var);
+                                let pending = sub_state.remove_pending(var).unwrap();
+                                let [b, d, a] = self.loop_motion(
+                                    var,
+                                    pending,
+                                    !has_written,
+                                    &possible_reads,
+                                    &constant,
+                                    &pending_set,
+                                    &loop_anal,
+                                );
+                                if let Some(b) = b {
+                                    before.push((var, b));
                                 }
-                                state.uncertain_shift();
-                            } else {
-                                for var in sub_state.reads() {
-                                    state.emit(var);
-                                    state.read(var);
+                                if let Some(d) = d {
+                                    to_perform.push((var, d));
+                                }
+                                if !loop_anal.no_effect {
+                                    if let Some(a) = a {
+                                        after.push((var, a));
+                                    }
                                 }
                             }
-                            state.insts.append(&mut sub_state.insts);
-                            state.written_calcs(
-                                sub_state.written.iter().map(|(i, v)| (*i, v.as_ref())),
-                            );
-                            state.perform_all(
-                                state.shift,
-                                &sub_state.pending.into_iter().collect::<Vec<_>>(),
-                            );
-                            state.shift = sub_state.shift;
+                            self.perform_all(0, &before);
+                            sub_state.perform_all(0, &to_perform);
+                        }
+                        let mut if_state = OptRebuild::<C>::new(self.shift, Some(cond));
+                        if loop_anal.at_most_once {
+                            if_state.inline(sub_state);
+                        } else if loop_anal.finite
+                            && sub_state.shift == self.shift
+                            && sub_state.insts.is_empty()
+                            && sub_state.pending.len() == 1
+                            && sub_state.pending.contains_key(&cond)
+                        {
+                            if_state.perform_all(0, &[(cond, Expr::val(C::ZERO))]);
                         } else {
-                            for var in sub_state.pending() {
-                                sub_state.emit(var);
-                            }
-                            if sub_state.sub_shift || sub_state.shift != state.shift {
-                                for var in state.pending() {
-                                    state.emit(var);
-                                }
-                                state.uncertain_shift();
-                            } else {
-                                sub_state.reads.insert(cond);
-                                let sub_reads = sub_state.reads();
-                                for var in sub_reads {
-                                    state.emit(var);
-                                    state.read(var);
-                                }
-                                let sub_written = sub_state.writes();
-                                for var in sub_written {
-                                    state.emit(var);
-                                    state.clobber(var);
-                                }
-                            }
-                            let block = Block {
-                                shift: sub_state.shift - state.shift,
-                                insts: sub_state.insts,
-                            };
-                            if is_loop {
-                                state.insts.push(Instr::Loop { cond, block });
-                            } else {
-                                state.insts.push(Instr::If { cond, block });
-                            }
+                            if_state.loop_or_if(sub_state, cond, true, &loop_anal);
+                        }
+                        if_state.perform_all(0, &after);
+                        if loop_anal.at_least_once || (!loop_anal.at_most_once && after.is_empty())
+                        {
+                            self.inline(if_state);
+                        } else if !if_state.insts.is_empty() || !if_state.pending.is_empty() {
+                            self.loop_or_if(if_state, cond, false, &loop_anal);
                         }
                     }
                 }
             }
         }
-        state.shift += block.shift;
-        return state;
+        self.shift += block.shift;
     }
 }
 
 impl<C: CellType> Program<C> {
     /// Optimize the program, and return the optimized copy of the program.
     pub fn optimize(&self) -> Self {
-        let mut state = OptRebuild::rebuild_block(self, 0, None);
+        let mut state = OptRebuild::new(0, None);
+        state.rebuild_block(self);
         for var in state.pending() {
             state.emit(var);
         }
