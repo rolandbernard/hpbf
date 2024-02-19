@@ -185,6 +185,38 @@ macro_rules! same_as_inplace_tests {
                 ",-[,[-<,.+>>><-.+[.]].+[.][.]<<]",
                 ifs_do_not_guarantee_zero_of_cond
             );
+            same_as_inplace_test!($i, "-+,+<,[>.[-]+.]", infinite_moving_loop);
+            same_as_inplace_test!($i, "[[[-]--[.].]-.]->.,.<.", nested_no_return_in_if);
+            same_as_inplace_test!($i, ".-[>+<[>[-].].]", inlining_non_read_but_written);
+            same_as_inplace_test!($i, "-[-],--+,.><->++<[[<[-].]+[>.].]", shift_in_loop);
+            same_as_inplace_test!(
+                $i,
+                ",+>+[[,<[+].]+[.-++].+]",
+                simple_loop_after_shifted_inline
+            );
+            same_as_inplace_test!(
+                $i,
+                "+++[[.,<<.[+]]-.[..+]]",
+                inlined_loop_after_shifted_inline
+            );
+            same_as_inplace_test!(
+                $i,
+                "+[[>[,-,-.].]-[<->.[.]].]",
+                inlined_loop_with_loop_motion
+            );
+            same_as_inplace_test!($i, "+[-,[,<,>,.]-<[+.-,]->.]", maybe_read_maybe_not);
+            same_as_inplace_test!($i, "+[[<<+>[+]>-],<<.]", loop_elimination_inside_if2);
+            same_as_inplace_test!($i, "->[.]<[.[->-<]]>[.]", zeroing_cond_written_in_loop);
+            same_as_inplace_test!(
+                $i,
+                "-[.[<[-].<><>>[-<->]]-[<.]]",
+                pending_depends_on_other_pending
+            );
+            same_as_inplace_test!(
+                $i,
+                "[+]>+[<[>-<+]->>.<]",
+                non_changing_in_first_loop_but_not_const
+            );
         }
     };
 }
