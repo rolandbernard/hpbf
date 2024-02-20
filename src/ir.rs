@@ -127,6 +127,20 @@ impl<C: CellType> Expr<C> {
         Expr { parts }
     }
 
+    /// Wrapping negate all coefficients.
+    pub fn neg(&self) -> Self {
+        Expr {
+            parts: self
+                .parts
+                .iter()
+                .map(|part| ExprPart {
+                    coef: part.coef.wrapping_neg(),
+                    vars: part.vars.clone(),
+                })
+                .collect(),
+        }
+    }
+
     /// If this expression has a constant value, return that constant value.
     ///
     /// # Examples
@@ -159,7 +173,7 @@ impl<C: CellType> Expr<C> {
     /// let expr = Expr::<u8>::var(0).mul(&Expr::<u8>::val(5));
     /// assert_eq!(expr.inc_of(0), None);
     /// ```
-    pub fn inc_of(&self, var: isize) -> Option<Expr<C>> {
+    pub fn inc_of(&self, var: isize) -> Option<Self> {
         if self
             .parts
             .iter()
@@ -242,8 +256,12 @@ impl<C: CellType> Expr<C> {
     /// let expr = Expr::<u8>::var(0).add(&Expr::<u8>::val(5));
     /// assert_eq!(expr.prod_of(0), None);
     /// ```
-    pub fn prod_of(&self, var: isize) -> Option<Expr<C>> {
-        if self.parts.iter().all(|part| part.vars.contains(&var)) {
+    pub fn prod_of(&self, var: isize) -> Option<Self> {
+        if self
+            .parts
+            .iter()
+            .all(|part| part.vars.iter().filter(|&x| x == &var).count() == 1)
+        {
             Some(Expr {
                 parts: self
                     .parts
@@ -513,19 +531,38 @@ impl<C: CellType> Debug for Expr<C> {
         if self.parts.is_empty() {
             write!(f, "0")?;
         }
-        for (i, part) in self.parts.iter().enumerate() {
+        for (i, part) in self
+            .parts
+            .iter()
+            .rev()
+            .filter(|p| p.coef < p.coef.wrapping_neg())
+            .chain(
+                self.parts
+                    .iter()
+                    .rev()
+                    .filter(|p| p.coef.wrapping_neg() <= p.coef),
+            )
+            .enumerate()
+        {
             if i != 0 {
-                write!(f, " + ")?;
+                if part.coef.wrapping_neg() <= part.coef {
+                    write!(f, " - ")?;
+                } else {
+                    write!(f, " + ")?;
+                }
+            } else if part.coef.wrapping_neg() <= part.coef {
+                write!(f, "-")?;
             }
-            if part.coef != C::ONE || part.vars.is_empty() {
-                if part.coef.wrapping_neg() < part.coef {
-                    write!(f, "-{:?}", part.coef.wrapping_neg())?;
+            let need_num = (part.coef != C::ONE && part.coef != C::NEG_ONE) || part.vars.is_empty();
+            if need_num {
+                if part.coef.wrapping_neg() <= part.coef {
+                    write!(f, "{:?}", part.coef.wrapping_neg())?;
                 } else {
                     write!(f, "{:?}", part.coef)?;
                 }
             }
             for (j, var) in part.vars.iter().enumerate() {
-                if j != 0 || part.coef != C::ONE || part.vars.is_empty() {
+                if j != 0 || need_num {
                     write!(f, "*")?;
                 }
                 write!(f, "[{var}]")?;
@@ -557,7 +594,16 @@ impl<C: CellType> Block<C> {
                         if val.constant() == Some(C::ZERO) {
                             writeln!(f, "{:indent$}[{}] = 0", "", dst, indent = indent)?;
                         } else if let Some(inc) = val.inc_of(*dst) {
-                            writeln!(f, "{:indent$}[{}] += {inc:?}", "", dst, indent = indent)?;
+                            if inc
+                                .parts
+                                .iter()
+                                .all(|part| part.coef.wrapping_neg() <= part.coef)
+                            {
+                                let dec = inc.neg();
+                                writeln!(f, "{:indent$}[{}] -= {dec:?}", "", dst, indent = indent)?;
+                            } else {
+                                writeln!(f, "{:indent$}[{}] += {inc:?}", "", dst, indent = indent)?;
+                            }
                         } else if let Some(mul) = val.prod_of(*dst) {
                             writeln!(f, "{:indent$}[{}] *= {mul:?}", "", dst, indent = indent)?;
                         } else {
