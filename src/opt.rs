@@ -496,6 +496,7 @@ impl<C: CellType> OptRebuild<C> {
         complete: bool,
         reads: &HashSet<isize>,
         constant: &HashSet<isize>,
+        linear: &HashMap<isize, Expr<C>>,
         other_pending: &HashSet<isize>,
         loop_anal: &OptLoop<C>,
     ) -> [Option<Expr<C>>; 3] {
@@ -517,9 +518,21 @@ impl<C: CellType> OptRebuild<C> {
             if complete {
                 if let Some(expr) = &loop_anal.expr {
                     if let Some(inc) = pending.inc_of(var) {
-                        let (before, after) = inc.split_along(constant);
+                        let (constant, other, linears) = inc.split_along(constant, linear);
+                        let mut before = constant.mul(expr);
+                        let mut after = other;
+                        for (initial, increment) in linears {
+                            let two = C::ONE.wrapping_add(C::ONE);
+                            if let Some(inc) = increment.div(two) {
+                                before = before
+                                    .add(&initial.mul(expr))
+                                    .add(&inc.mul(expr).mul(&expr.add(&Expr::val(C::NEG_ONE))));
+                            } else {
+                                after = after.add(&initial);
+                            }
+                        }
                         return [
-                            Some(Expr::var(var).add(&before.mul(expr))),
+                            Some(Expr::var(var).add(&before)),
                             Some(Expr::var(var).add(&after)),
                             None,
                         ];
@@ -690,6 +703,27 @@ impl<C: CellType> OptRebuild<C> {
         }
         return constant;
     }
+
+    /// Find the variables that only increment by an expression using only
+    /// constants in their operation and return that increment.
+    fn linear_among(
+        &self,
+        sub_state: &Self,
+        constant: &HashSet<isize>,
+        vars: impl Iterator<Item = isize>,
+    ) -> HashMap<isize, Expr<C>> {
+        let mut linear = HashMap::new();
+        for var in vars {
+            if let Some(complete) = sub_state.get(var) {
+                if let Some(inc) = complete.inc_of(var) {
+                    if inc.variables().all(|x| constant.contains(&x)) {
+                        linear.insert(var, inc);
+                    }
+                }
+            }
+        }
+        return linear;
+    }
 }
 
 impl<C: CellType> OptRebuild<C> {
@@ -746,6 +780,11 @@ impl<C: CellType> OptRebuild<C> {
                                 &sub_state,
                                 possible_reads.iter().chain(pending.iter()).copied(),
                             );
+                            let linear = self.linear_among(
+                                &sub_state,
+                                &constant,
+                                possible_reads.iter().chain(pending.iter()).copied(),
+                            );
                             let mut before = Vec::new();
                             let mut to_perform = Vec::new();
                             let pending_set = pending
@@ -762,6 +801,7 @@ impl<C: CellType> OptRebuild<C> {
                                     !has_written,
                                     &possible_reads,
                                     &constant,
+                                    &linear,
                                     &pending_set,
                                     &loop_anal,
                                 );

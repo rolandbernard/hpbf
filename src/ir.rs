@@ -84,6 +84,37 @@ impl<C: CellType> Expr<C> {
                 *v = v.wrapping_add(coef);
             }
         }
+        // Special detection of e.g. 128*x + 129*x*x which is equivalent to x*x.
+        let half_mod = C::ONE.wrapping_shl(C::BITS - 1);
+        for vars in parts
+            .keys()
+            .filter(|x| !x.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if let Some(&coef) = parts.get(&vars) {
+                for &var in &vars {
+                    let mut vars_p = vars.clone();
+                    vars_p.push(var);
+                    vars_p.sort();
+                    if let Some(&coef_p) = parts.get(&vars_p) {
+                        // For now, only do this when it enables us to eliminate
+                        // a multiplication or even a complete term.
+                        if (coef_p != C::ZERO && (coef != C::ZERO || coef_p == half_mod))
+                            && (coef == half_mod
+                                || coef == half_mod.wrapping_add(C::ONE)
+                                || coef == half_mod.wrapping_add(C::NEG_ONE)
+                                || coef_p == half_mod
+                                || coef_p == half_mod.wrapping_add(C::ONE)
+                                || coef_p == half_mod.wrapping_add(C::NEG_ONE))
+                        {
+                            *parts.get_mut(&vars).unwrap() = coef.wrapping_add(half_mod);
+                            *parts.get_mut(&vars_p).unwrap() = coef_p.wrapping_add(half_mod);
+                        }
+                    }
+                }
+            }
+        }
         let mut parts = parts
             .into_iter()
             .filter(|(_, coef)| *coef != C::ZERO)
@@ -141,6 +172,19 @@ impl<C: CellType> Expr<C> {
         }
     }
 
+    /// Try to do a division by a constant. This will only succeed if all the
+    /// coefficients of the polynomial can be divided.
+    pub fn div(&self, div: C) -> Option<Self> {
+        let mut parts = Vec::new();
+        for part in &self.parts {
+            parts.push(ExprPart {
+                coef: part.coef.wrapping_div(div)?,
+                vars: part.vars.clone(),
+            });
+        }
+        Some(Expr { parts })
+    }
+
     /// If this expression has a constant value, return that constant value.
     ///
     /// # Examples
@@ -196,19 +240,53 @@ impl<C: CellType> Expr<C> {
         }
     }
 
-    /// Split this expression into parts that includes only variables in the
-    /// given set `include` and the rest.
-    pub fn split_along(&self, include: &HashSet<isize>) -> (Expr<C>, Expr<C>) {
-        let mut first = Vec::new();
-        let mut second = Vec::new();
+    /// Split this expression into parts that are either completely constant or
+    /// linear. For linear parts, the initial value and increment are given.
+    pub fn split_along(
+        &self,
+        constant: &HashSet<isize>,
+        linear: &HashMap<isize, Self>,
+    ) -> (Self, Self, Vec<(Self, Self)>) {
+        let mut const_parts = Vec::new();
+        let mut linear_parts = Vec::new();
+        let mut other_parts = Vec::new();
         for part in &self.parts {
-            if part.vars.iter().all(|v| include.contains(v)) {
-                first.push(part.clone());
+            if part.vars.iter().all(|v| constant.contains(v)) {
+                const_parts.push(part.clone());
+            } else if part
+                .vars
+                .iter()
+                .all(|v| constant.contains(v) || linear.contains_key(v))
+                && part.vars.iter().filter(|x| !constant.contains(x)).count() == 1
+            {
+                let lin_var = part.vars.iter().find(|x| !constant.contains(x)).unwrap();
+                let increment = ExprPart {
+                    coef: part.coef,
+                    vars: part
+                        .vars
+                        .iter()
+                        .filter(|&x| x != lin_var)
+                        .copied()
+                        .collect(),
+                };
+                linear_parts.push((
+                    Expr {
+                        parts: vec![part.clone()],
+                    },
+                    Expr {
+                        parts: vec![increment],
+                    }
+                    .mul(&linear[lin_var]),
+                ));
             } else {
-                second.push(part.clone());
+                other_parts.push(part.clone());
             }
         }
-        (Expr { parts: first }, Expr { parts: second })
+        (
+            Expr { parts: const_parts },
+            Expr { parts: other_parts },
+            linear_parts,
+        )
     }
 
     /// Combination of [`Self::inc_of`] and [`Self::constant`].
