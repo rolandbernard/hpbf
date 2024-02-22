@@ -1,3 +1,5 @@
+//! A basic interpreter on the internal IR.
+
 use crate::{Block, CellType, Context, Error, Instr, Program};
 
 use super::Executor;
@@ -78,9 +80,7 @@ impl<'p, C: CellType> Executor<'p, C> for BaseInterpreter<C> {
     fn create(code: &str, no_opt: bool, opt: u32) -> Result<Self, Error> {
         let mut program = Program::<C>::parse(code)?;
         if !no_opt {
-            for _ in 0..opt {
-                program = program.optimize();
-            }
+            program = program.optimize(opt);
         }
         Ok(BaseInterpreter { program })
     }

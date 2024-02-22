@@ -1,3 +1,5 @@
+//! An inplace interpreter that works directly on the code string.
+
 use std::marker::PhantomData;
 
 use crate::{CellType, Context, Error, ErrorKind};

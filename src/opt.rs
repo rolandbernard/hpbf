@@ -1,3 +1,6 @@
+//! Optimizer for the internal IR. Performs mostly constant propagation,
+//! loop analysis, and dead code elimination.
+
 use std::collections::{HashMap, HashSet};
 
 use crate::{Block, CellType, Expr, Instr, Program};
@@ -521,12 +524,21 @@ impl<C: CellType> OptRebuild<C> {
                         let (constant, other, linears) = inc.split_along(constant, linear);
                         let mut before = constant.mul(expr);
                         let mut after = other;
+                        let expr_neg_one = expr.add(&Expr::val(C::NEG_ONE));
                         for (initial, increment) in linears {
                             let two = C::ONE.wrapping_add(C::ONE);
                             if let Some(inc) = increment.div(two) {
                                 before = before
                                     .add(&initial.mul(expr))
-                                    .add(&inc.mul(expr).mul(&expr.add(&Expr::val(C::NEG_ONE))));
+                                    .add(&inc.mul(expr).mul(&expr_neg_one));
+                            } else if let Some(inc) = expr.div(two) {
+                                before = before
+                                    .add(&initial.mul(expr))
+                                    .add(&inc.mul(&increment).mul(&expr_neg_one));
+                            } else if let Some(inc) = expr_neg_one.div(two) {
+                                before = before
+                                    .add(&initial.mul(expr))
+                                    .add(&inc.mul(expr).mul(&increment));
                             } else {
                                 after = after.add(&initial);
                             }
@@ -850,7 +862,7 @@ impl<C: CellType> OptRebuild<C> {
 
 impl<C: CellType> Program<C> {
     /// Optimize the program, and return the optimized copy of the program.
-    pub fn optimize(&self) -> Self {
+    pub fn optimize(&self, _level: u32) -> Self {
         let mut state = OptRebuild::new(0, None);
         state.rebuild_block(self);
         for var in state.pending() {

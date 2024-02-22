@@ -1,3 +1,5 @@
+//! This module contains different execution providers.
+
 use crate::{CellType, Context, Error};
 
 #[macro_use]

@@ -8,6 +8,7 @@ macro_rules! executor_tests {
             fn simple_execution() -> Result<(), Error<'static>> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
+                // https://esolangs.org/wiki/Brainfuck#Examples
                 let code = ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
                             +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.";
                 let exec = $i::<u8>::create(code, false, 1)?;
@@ -21,6 +22,7 @@ macro_rules! executor_tests {
             fn simple_execution_u16() -> Result<(), Error<'static>> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u16>::new(None, Some(Box::new(&mut buf)));
+                // https://esolangs.org/wiki/Brainfuck#Examples
                 let code = ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
                             +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.";
                 let exec = $i::<u16>::create(code, false, 1)?;
@@ -34,6 +36,7 @@ macro_rules! executor_tests {
             fn simple_execution_u32() -> Result<(), Error<'static>> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u32>::new(None, Some(Box::new(&mut buf)));
+                // https://esolangs.org/wiki/Brainfuck#Examples
                 let code = ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
                             +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.";
                 let exec = $i::<u32>::create(code, false, 1)?;
@@ -47,6 +50,7 @@ macro_rules! executor_tests {
             fn simple_execution_u64() -> Result<(), Error<'static>> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
+                // https://esolangs.org/wiki/Brainfuck#Examples
                 let code = ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
                             +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.";
                 let exec = $i::<u64>::create(code, false, 1)?;
@@ -61,6 +65,7 @@ macro_rules! executor_tests {
             fn test_program_access_distant_cell() -> Result<(), Error<'static>> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
+                // https://brainfuck.org/tests.b
                 let code = "++++[>++++++<-]>[>+++++>+++++++<<-]>>++++<[[>[[
                             >>+<<-]<]>>>-]>-[>+>+<<-]>]+++++[>+++++++<<++>-]>.<<.";
                 let exec = $i::<u64>::create(code, false, 1)?;
@@ -74,6 +79,7 @@ macro_rules! executor_tests {
             fn test_program_output_h() -> Result<(), Error<'static>> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
+                // https://brainfuck.org/tests.b
                 let code = "[]++++++++++[>>+>+>++++++[<<+<+++>>>-]<<<<-]
                             \"A*$\";?@![#>>+<<]>[>>]<<<<[>++<[-]]>.>.";
                 let exec = $i::<u64>::create(code, false, 1)?;
@@ -91,6 +97,7 @@ macro_rules! executor_tests {
                     Some(Box::new("~mlk zyx".as_bytes())),
                     Some(Box::new(&mut buf)),
                 );
+                // https://brainfuck.org/rot13.b
                 let code = ",
                     [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
                     [>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
@@ -156,6 +163,7 @@ macro_rules! same_as_inplace_tests {
         mod tests_same_as_inplace {
             use crate::{$i, Context, Error, Executor, InplaceInterpreter};
 
+            // Test cases that have previously caused issues found using fuzzing.
             same_as_inplace_test!($i, "<+[-..+]", infinite_loop_with_canceling_cond);
             same_as_inplace_test!($i, "+>-[[...<..>[.]].]", no_return_reading_two_cells);
             same_as_inplace_test!($i, "--.[.[+<->.]<]-+", muladd_must_be_performed_before_loop);
