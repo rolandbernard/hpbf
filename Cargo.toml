@@ -3,9 +3,19 @@ name = "hpbf"
 version = "0.1.0"
 edition = "2021"
 
+[profile.bench]
+debug = true
+
+[[bench]]
+name = "optimizer"
+harness = false
+
 [features]
 default = []
 llvm = ["dep:inkwell"]
 
 [dependencies]
 inkwell = { version = "0.3.0", features = ["llvm17-0-prefer-dynamic"], optional = true }
+
+[dev-dependencies]
+iai-callgrind = "0.10.2"
