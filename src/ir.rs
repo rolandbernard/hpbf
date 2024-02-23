@@ -1,11 +1,11 @@
 //! Contains parsing and some optimizing transformations for a Brainfuck program.
 
-use std::{
-    collections::{HashMap, HashSet},
-    fmt::{self, Debug},
-};
+use std::fmt::{self, Debug};
 
-use crate::{CellType, Error, ErrorKind};
+use crate::{
+    hasher::{HashMap, HashSet},
+    CellType, Error, ErrorKind,
+};
 
 /// Parts of expression. Represents the product of the coefficient and the set
 /// of variables.
@@ -67,54 +67,64 @@ impl<C: CellType> Expr<C> {
         }
     }
 
+    /// Special detection of e.g. 128*x + 129*x*x which is equivalent to x*x.
+    /// For now, only do this when it enables us to eliminate a multiplication
+    /// or even a complete term.
+    fn special_normalization_rules(parts: &mut HashMap<Vec<isize>, C>) {
+        if parts.len() >= 2 && parts.iter().any(|(vs, c)| vs.len() >= 2 && *c != C::ZERO) {
+            let half_mod = C::ONE.wrapping_shl(C::BITS - 1);
+            let half_mod_p = half_mod.wrapping_add(C::ONE);
+            let half_mod_m = half_mod.wrapping_add(C::NEG_ONE);
+            if parts.iter().any(|(vs, c)| {
+                !vs.is_empty() && (*c == half_mod || *c == half_mod_p || *c == half_mod_m)
+            }) {
+                for vars in parts
+                    .iter()
+                    .filter(|(v, c)| v.len() >= 2 && *c != &C::ZERO)
+                    .map(|(v, _)| v.clone())
+                    .collect::<Vec<_>>()
+                {
+                    for i in 0..vars.len() {
+                        let vars_m = vars
+                            .iter()
+                            .enumerate()
+                            .filter(|(j, _)| *j != i)
+                            .map(|(_, v)| *v)
+                            .collect::<Vec<_>>();
+                        if let (Some(&coef), Some(&coef_m)) = (parts.get(&vars), parts.get(&vars_m))
+                        {
+                            if (coef != C::ZERO && (coef_m != C::ZERO || coef == half_mod))
+                                && (coef == half_mod
+                                    || coef == half_mod_p
+                                    || coef == half_mod_m
+                                    || coef_m == half_mod
+                                    || coef_m == half_mod_p
+                                    || coef_m == half_mod_m)
+                            {
+                                *parts.get_mut(&vars).unwrap() = coef.wrapping_add(half_mod);
+                                *parts.get_mut(&vars_m).unwrap() = coef_m.wrapping_add(half_mod);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Multiply two expressions and return the resulting expressions.
     pub fn mul(&self, other: &Self) -> Self {
-        let mut parts = HashMap::new();
+        let mut parts = HashMap::with_capacity(self.parts.len() * other.parts.len());
         for self_part in &self.parts {
             for other_part in &other.parts {
-                let mut vars = self_part
-                    .vars
-                    .iter()
-                    .chain(other_part.vars.iter())
-                    .copied()
-                    .collect::<Vec<_>>();
+                let mut vars = self_part.vars.clone();
+                vars.extend(other_part.vars.iter().copied());
                 vars.sort();
                 let coef = self_part.coef.wrapping_mul(other_part.coef);
                 let v = parts.entry(vars).or_insert(C::ZERO);
                 *v = v.wrapping_add(coef);
             }
         }
-        // Special detection of e.g. 128*x + 129*x*x which is equivalent to x*x.
-        let half_mod = C::ONE.wrapping_shl(C::BITS - 1);
-        for vars in parts
-            .keys()
-            .filter(|x| !x.is_empty())
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            if let Some(&coef) = parts.get(&vars) {
-                for &var in &vars {
-                    let mut vars_p = vars.clone();
-                    vars_p.push(var);
-                    vars_p.sort();
-                    if let Some(&coef_p) = parts.get(&vars_p) {
-                        // For now, only do this when it enables us to eliminate
-                        // a multiplication or even a complete term.
-                        if (coef_p != C::ZERO && (coef != C::ZERO || coef_p == half_mod))
-                            && (coef == half_mod
-                                || coef == half_mod.wrapping_add(C::ONE)
-                                || coef == half_mod.wrapping_add(C::NEG_ONE)
-                                || coef_p == half_mod
-                                || coef_p == half_mod.wrapping_add(C::ONE)
-                                || coef_p == half_mod.wrapping_add(C::NEG_ONE))
-                        {
-                            *parts.get_mut(&vars).unwrap() = coef.wrapping_add(half_mod);
-                            *parts.get_mut(&vars_p).unwrap() = coef_p.wrapping_add(half_mod);
-                        }
-                    }
-                }
-            }
-        }
+        Self::special_normalization_rules(&mut parts);
         let mut parts = parts
             .into_iter()
             .filter(|(_, coef)| *coef != C::ZERO)
@@ -127,7 +137,7 @@ impl<C: CellType> Expr<C> {
     /// Add two expressions and return the resulting expressions.
     pub fn add(&self, other: &Self) -> Self {
         let (mut i, mut j) = (0, 0);
-        let mut parts = Vec::new();
+        let mut parts = Vec::with_capacity(self.parts.len() + other.parts.len());
         while i < self.parts.len() && j < other.parts.len() {
             if self.parts[i].vars < other.parts[j].vars {
                 parts.push(self.parts[i].clone());
@@ -172,17 +182,20 @@ impl<C: CellType> Expr<C> {
         }
     }
 
-    /// Try to do a division by a constant. This will only succeed if all the
-    /// coefficients of the polynomial can be divided.
-    pub fn div(&self, div: C) -> Option<Self> {
-        let mut parts = Vec::new();
-        for part in &self.parts {
-            parts.push(ExprPart {
-                coef: part.coef.wrapping_div(div)?,
-                vars: part.vars.clone(),
-            });
+    /// Try to divide by two. This is only possible if all coefficients are off.
+    pub fn half(&self) -> Option<Self> {
+        if self.parts.iter().all(|part| !part.coef.is_odd()) {
+            let mut parts = Vec::with_capacity(self.parts.len());
+            for part in &self.parts {
+                parts.push(ExprPart {
+                    coef: part.coef.wrapping_shr(1),
+                    vars: part.vars.clone(),
+                });
+            }
+            Some(Expr { parts })
+        } else {
+            None
         }
-        Some(Expr { parts })
     }
 
     /// If this expression has a constant value, return that constant value.
@@ -411,15 +424,65 @@ impl<C: CellType> Expr<C> {
     where
         F: Fn(isize) -> Option<Self>,
     {
-        let mut val = Expr::val(C::ZERO);
-        for part in &self.parts {
-            let mut part_val = Expr::val(part.coef);
-            for &var in &part.vars {
-                part_val = part_val.mul(&func(var)?);
+        if let Some(var) = self.identity() {
+            func(var)
+        } else if let Some(val) = self.constant() {
+            Some(Expr::val(val))
+        } else {
+            let mut parts = HashMap::with_capacity(self.parts.len());
+            for part in &self.parts {
+                if part.vars.is_empty() {
+                    let v = parts.entry(vec![]).or_insert(C::ZERO);
+                    *v = v.wrapping_add(part.coef);
+                } else if part.vars.len() == 1 {
+                    for var_part in func(part.vars[0])?.parts {
+                        let v = parts.entry(var_part.vars).or_insert(C::ZERO);
+                        *v = v.wrapping_add(part.coef.wrapping_mul(var_part.coef));
+                    }
+                } else {
+                    let mut partial = func(part.vars[0])?.parts;
+                    for &var in part.vars.iter().skip(1) {
+                        let var_parts = func(var)?.parts;
+                        if var_parts.is_empty() {
+                            partial.clear();
+                        } else if var_parts.len() == 1 {
+                            for ExprPart { vars, coef } in &mut partial {
+                                vars.extend(var_parts[0].vars.iter().copied());
+                                vars.sort();
+                                *coef = coef.wrapping_mul(var_parts[0].coef);
+                            }
+                        } else {
+                            let mut new_partial = HashMap::new();
+                            for ExprPart { vars, coef } in partial {
+                                for var_part in &var_parts {
+                                    let mut vars = vars.clone();
+                                    vars.extend(var_part.vars.iter().copied());
+                                    vars.sort();
+                                    let v = new_partial.entry(vars).or_insert(C::ZERO);
+                                    *v = v.wrapping_add(coef.wrapping_mul(var_part.coef));
+                                }
+                            }
+                            partial = new_partial
+                                .into_iter()
+                                .map(|(vars, coef)| ExprPart { coef, vars })
+                                .collect::<Vec<_>>();
+                        }
+                    }
+                    for ExprPart { vars, coef } in partial {
+                        let v = parts.entry(vars).or_insert(C::ZERO);
+                        *v = v.wrapping_add(part.coef.wrapping_mul(coef));
+                    }
+                }
             }
-            val = val.add(&part_val);
+            Self::special_normalization_rules(&mut parts);
+            let mut parts = parts
+                .into_iter()
+                .filter(|(_, coef)| *coef != C::ZERO)
+                .map(|(vars, coef)| ExprPart { coef, vars })
+                .collect::<Vec<_>>();
+            parts.sort_by(|a, b| a.vars.cmp(&b.vars));
+            Some(Expr { parts })
         }
-        return Some(val);
     }
 
     /// Return an iterator over all the variables used in this expression.
@@ -775,6 +838,23 @@ mod tests {
                 str: code,
                 position: 12
             })
+        );
+    }
+
+    #[test]
+    fn ir_implements_debug() {
+        let code = "+++++[>[-],.<]--";
+        let prog = Program::<u8>::parse(code).unwrap();
+        assert_eq!(
+            format!("{prog:?}"),
+            "[0] += 5\n\
+            loop [0] {\n  \
+                [1] = 0\n  \
+                input [1]\n  \
+                output [1]\n\
+            }\n\
+            [0] -= 2\n\
+            "
         );
     }
 }

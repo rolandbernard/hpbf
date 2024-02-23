@@ -1,9 +1,10 @@
 //! Optimizer for the internal IR. Performs mostly constant propagation,
 //! loop analysis, and dead code elimination.
 
-use std::collections::{HashMap, HashSet};
-
-use crate::{Block, CellType, Expr, Instr, Program};
+use crate::{
+    hasher::{HashMap, HashSet},
+    Block, CellType, Expr, Instr, Program,
+};
 
 /// A write can either be known, unknown. A write that is not guaranteed to happen
 /// is encoded with [`OptWrite::Maybe`], while a write that is guaranteed to happen,
@@ -236,7 +237,7 @@ impl<C: CellType> OptRebuild<C> {
     /// the current state. This will not emit any instructions, but only add
     /// the necessary pending operations.
     fn perform_all(&mut self, shift: isize, calcs: &[(isize, Expr<C>)]) {
-        let mut exprs = Vec::new();
+        let mut exprs = Vec::with_capacity(calcs.len());
         for (var, expr) in calcs {
             let pending = expr
                 .symb_evaluate(|i| Some(self.get_pending(i + shift)))
@@ -279,14 +280,12 @@ impl<C: CellType> OptRebuild<C> {
         if self.pending.contains_key(&var) {
             stack.push(var);
         }
-        if low == depth {
-            let mut new_comp = Vec::new();
+        if low == depth && stack.len() != stack_len {
+            let mut new_comp = Vec::with_capacity(stack.len() - stack_len);
             while stack.len() != stack_len {
                 new_comp.push(stack.pop().unwrap());
             }
-            if !new_comp.is_empty() {
-                comps.push(new_comp);
-            }
+            comps.push(new_comp);
         }
         return low;
     }
@@ -296,7 +295,7 @@ impl<C: CellType> OptRebuild<C> {
     /// returns the operations that must be performed grouped by, and in the order
     /// in which they must be emitted.
     fn gather_for_emit(&mut self, emit: &[isize]) -> Vec<Vec<isize>> {
-        let mut visited = HashMap::new();
+        let mut visited = HashMap::with_capacity(emit.len());
         let mut stack = Vec::new();
         let mut comps = Vec::new();
         for (run, &var) in emit.iter().enumerate() {
@@ -308,11 +307,8 @@ impl<C: CellType> OptRebuild<C> {
     }
 
     /// Record the execution of the given operations.
-    fn written_calcs<'a>(&mut self, calcs: impl Iterator<Item = (isize, OptWrite<C>)>)
-    where
-        C: 'a,
-    {
-        let mut knowns = Vec::new();
+    fn written_calcs(&mut self, calcs: impl Iterator<Item = (isize, OptWrite<C>)>) {
+        let mut knowns = Vec::with_capacity(calcs.size_hint().0);
         for (var, calc) in calcs {
             if let OptWrite::Known(calc) = calc {
                 if let Some(calc) = calc.symb_evaluate(|i| self.get_written(i)) {
@@ -526,16 +522,15 @@ impl<C: CellType> OptRebuild<C> {
                         let mut after = other;
                         let expr_neg_one = expr.add(&Expr::val(C::NEG_ONE));
                         for (initial, increment) in linears {
-                            let two = C::ONE.wrapping_add(C::ONE);
-                            if let Some(inc) = increment.div(two) {
+                            if let Some(inc) = increment.half() {
                                 before = before
                                     .add(&initial.mul(expr))
                                     .add(&inc.mul(expr).mul(&expr_neg_one));
-                            } else if let Some(inc) = expr.div(two) {
+                            } else if let Some(inc) = expr.half() {
                                 before = before
                                     .add(&initial.mul(expr))
                                     .add(&inc.mul(&increment).mul(&expr_neg_one));
-                            } else if let Some(inc) = expr_neg_one.div(two) {
+                            } else if let Some(inc) = expr_neg_one.half() {
                                 before = before
                                     .add(&initial.mul(expr))
                                     .add(&inc.mul(expr).mul(&increment));
@@ -672,35 +667,71 @@ impl<C: CellType> OptRebuild<C> {
         sub_state: &Self,
         vars: impl Iterator<Item = isize>,
     ) -> HashSet<isize> {
+        fn check_constant<F, I>(
+            var: isize,
+            iter: F,
+            constant: &mut HashSet<isize>,
+            dependents: &mut HashMap<isize, Vec<isize>>,
+            depends_on: &mut HashMap<isize, usize>,
+        ) where
+            F: Fn() -> I,
+            I: Iterator<Item = isize>,
+        {
+            if iter().all(|x| x == var || constant.contains(&x)) {
+                constant.insert(var);
+            } else {
+                let mut cnt = 0;
+                for v in iter().filter(|&x| x != var) {
+                    dependents.entry(v).or_insert(Vec::new()).push(var);
+                    cnt += 1;
+                }
+                depends_on.insert(var, cnt);
+            }
+        }
         let mut constant = HashSet::new();
         let mut dependents = HashMap::new();
         let mut depends_on = HashMap::new();
         for var in vars {
-            let complete = sub_state.get(var);
-            let written = sub_state.get_written(var);
-            if complete.is_some() && written.is_some() {
-                let complete = complete.unwrap();
-                let written = written.unwrap();
-                if self.compare(&Expr::var(var), &complete)
-                    && self.compare(&Expr::var(var), &written)
-                {
-                    let vars = written
-                        .variables()
-                        .chain(complete.variables())
-                        .filter(|&x| x != var)
-                        .collect::<HashSet<_>>();
-                    if vars.iter().all(|x| constant.contains(x)) {
-                        constant.insert(var);
-                    } else {
-                        for &v in &vars {
-                            dependents.entry(v).or_insert(Vec::new()).push(var);
+            if let Some(write) = sub_state.written.get(&var) {
+                if let OptWrite::Known(written) = write {
+                    if self.compare(&Expr::var(var), written) {
+                        if let Some(pending) = sub_state.pending.get(&var) {
+                            if self.compare(&Expr::var(var), pending) {
+                                check_constant(
+                                    var,
+                                    || written.variables().chain(pending.variables()),
+                                    &mut constant,
+                                    &mut dependents,
+                                    &mut depends_on,
+                                );
+                            }
+                        } else {
+                            check_constant(
+                                var,
+                                || written.variables(),
+                                &mut constant,
+                                &mut dependents,
+                                &mut depends_on,
+                            );
                         }
-                        depends_on.insert(var, vars.len());
                     }
                 }
+            } else if let Some(pending) = sub_state.pending.get(&var) {
+                if self.compare(&Expr::var(var), pending) {
+                    check_constant(
+                        var,
+                        || pending.variables(),
+                        &mut constant,
+                        &mut dependents,
+                        &mut depends_on,
+                    );
+                }
+            } else {
+                constant.insert(var);
             }
         }
-        let mut stack = constant.iter().copied().collect::<Vec<_>>();
+        let mut stack = Vec::with_capacity(constant.len());
+        stack.extend(constant.iter().copied());
         while let Some(c) = stack.pop() {
             if let Some(deps) = dependents.remove(&c) {
                 for dep in deps {
@@ -861,8 +892,7 @@ impl<C: CellType> OptRebuild<C> {
 }
 
 impl<C: CellType> Program<C> {
-    /// Optimize the program, and return the optimized copy of the program.
-    pub fn optimize(&self, _level: u32) -> Self {
+    fn optimize_once(&self) -> Self {
         let mut state = OptRebuild::new(0, None);
         state.rebuild_block(self);
         for var in state.pending() {
@@ -871,6 +901,19 @@ impl<C: CellType> Program<C> {
         Program {
             shift: state.shift,
             insts: state.insts,
+        }
+    }
+
+    /// Optimize the program, and return the optimized copy of the program.
+    pub fn optimize(&self, level: u32) -> Self {
+        if level != 0 {
+            let mut result = self.optimize_once();
+            for _ in 1..level {
+                result = result.optimize_once();
+            }
+            return result;
+        } else {
+            self.clone()
         }
     }
 }
