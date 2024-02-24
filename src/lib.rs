@@ -5,6 +5,7 @@ mod hasher;
 mod ir;
 mod opt;
 mod runtime;
+mod smallvec;
 
 use std::{fmt::Debug, hash::Hash};
 

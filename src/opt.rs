@@ -3,6 +3,7 @@
 
 use crate::{
     hasher::{HashMap, HashSet},
+    smallvec::SmallVec,
     Block, CellType, Expr, Instr, Program,
 };
 
@@ -141,7 +142,8 @@ impl<C: CellType> OptRebuild<C> {
     fn insert_pending(&mut self, var: isize, expr: Expr<C>) {
         self.remove_pending(var);
         if expr.identity() != Some(var) {
-            for v in expr.variables() {
+            let expr = expr.normalize();
+            for v in expr.variables().filter(|&x| x != var) {
                 let users = self.reverse.entry(v).or_insert(HashSet::new());
                 users.insert(var);
             }
@@ -153,7 +155,7 @@ impl<C: CellType> OptRebuild<C> {
     fn insert_written(&mut self, var: isize, val: OptWrite<C>) {
         if let OptWrite::Known(expr) = val {
             if expr.identity() != Some(var) {
-                self.written.insert(var, OptWrite::Known(expr));
+                self.written.insert(var, OptWrite::Known(expr.normalize()));
             } else {
                 self.written.remove(&var);
             }
@@ -193,7 +195,7 @@ impl<C: CellType> OptRebuild<C> {
     /// given variable since the start of the block, or [`None`] if unknown.
     fn get(&self, var: isize) -> Option<Expr<C>> {
         if let Some(expr) = self.pending.get(&var) {
-            expr.symb_evaluate(|i| self.get_written(i))
+            self.eval_written(expr)
         } else {
             self.get_written(var)
         }
@@ -237,11 +239,9 @@ impl<C: CellType> OptRebuild<C> {
     /// the current state. This will not emit any instructions, but only add
     /// the necessary pending operations.
     fn perform_all(&mut self, shift: isize, calcs: &[(isize, Expr<C>)]) {
-        let mut exprs = Vec::with_capacity(calcs.len());
+        let mut exprs = SmallVec::<_, 1>::with_capacity(calcs.len());
         for (var, expr) in calcs {
-            let pending = expr
-                .symb_evaluate(|i| Some(self.get_pending(i + shift)))
-                .unwrap();
+            let pending = self.eval_pending(shift, expr);
             exprs.push((shift + *var, pending));
         }
         for (var, expr) in exprs {
@@ -258,7 +258,7 @@ impl<C: CellType> OptRebuild<C> {
         depth: usize,
         visited: &mut HashMap<isize, (usize, usize)>,
         stack: &mut Vec<isize>,
-        comps: &mut Vec<Vec<isize>>,
+        comps: &mut Vec<SmallVec<isize, 1>>,
     ) -> usize {
         visited.insert(var, (run, depth));
         let stack_len = stack.len();
@@ -281,7 +281,7 @@ impl<C: CellType> OptRebuild<C> {
             stack.push(var);
         }
         if low == depth && stack.len() != stack_len {
-            let mut new_comp = Vec::with_capacity(stack.len() - stack_len);
+            let mut new_comp = SmallVec::with_capacity(stack.len() - stack_len);
             while stack.len() != stack_len {
                 new_comp.push(stack.pop().unwrap());
             }
@@ -294,13 +294,22 @@ impl<C: CellType> OptRebuild<C> {
     /// other pending operations. This function performs the necessary steps and
     /// returns the operations that must be performed grouped by, and in the order
     /// in which they must be emitted.
-    fn gather_for_emit(&mut self, emit: &[isize]) -> Vec<Vec<isize>> {
-        let mut visited = HashMap::with_capacity(emit.len());
-        let mut stack = Vec::new();
+    fn gather_for_emit(&mut self, emit: &[isize]) -> Vec<SmallVec<isize, 1>> {
         let mut comps = Vec::new();
-        for (run, &var) in emit.iter().enumerate() {
-            if !visited.contains_key(&var) {
-                self.gather_to_emit_dfs(var, run, 0, &mut visited, &mut stack, &mut comps);
+        if emit.iter().all(|var| !self.reverse.contains_key(var)) {
+            // Optimize the common case where no one depends on anyone else.
+            for &var in emit {
+                if self.pending.contains_key(&var) {
+                    comps.push(SmallVec::with(var));
+                }
+            }
+        } else {
+            let mut visited = HashMap::with_capacity(2 * emit.len());
+            let mut stack = Vec::with_capacity(4);
+            for (run, &var) in emit.iter().enumerate() {
+                if !visited.contains_key(&var) {
+                    self.gather_to_emit_dfs(var, run, 0, &mut visited, &mut stack, &mut comps);
+                }
             }
         }
         return comps;
@@ -308,10 +317,10 @@ impl<C: CellType> OptRebuild<C> {
 
     /// Record the execution of the given operations.
     fn written_calcs(&mut self, calcs: impl Iterator<Item = (isize, OptWrite<C>)>) {
-        let mut knowns = Vec::with_capacity(calcs.size_hint().0);
+        let mut knowns = SmallVec::<_, 1>::with_capacity(calcs.size_hint().0);
         for (var, calc) in calcs {
             if let OptWrite::Known(calc) = calc {
-                if let Some(calc) = calc.symb_evaluate(|i| self.get_written(i)) {
+                if let Some(calc) = self.eval_written(calc) {
                     knowns.push((var, OptWrite::Known(calc)));
                 } else {
                     knowns.push((var, OptWrite::Unknown));
@@ -326,9 +335,9 @@ impl<C: CellType> OptRebuild<C> {
     }
 
     /// Emit pending operations in the order and grouping specified in `to_emit`.
-    fn emit_structured(&mut self, to_emit: Vec<Vec<isize>>) {
+    fn emit_structured(&mut self, to_emit: Vec<SmallVec<isize, 1>>) {
         for vars in to_emit {
-            let mut calcs = Vec::with_capacity(vars.len());
+            let mut calcs = SmallVec::with_capacity(vars.len());
             for var in vars {
                 if let Some(calc) = self.remove_pending(var) {
                     for referenced in calc.variables() {
@@ -420,24 +429,87 @@ impl<C: CellType> OptRebuild<C> {
             .collect()
     }
 
+    /// Resolve all constants in the expression `expr`.
+    fn reduce_const(&self, expr: Expr<C>, constant: &HashSet<isize>) -> Expr<C> {
+        if expr.variables().any(|i| constant.contains(&i)) {
+            expr.symb_evaluate(|i| {
+                if constant.contains(&i) {
+                    if let Some(c) = self.get_constant(i) {
+                        return Some(Expr::val(c));
+                    }
+                }
+                Some(Expr::var(i))
+            })
+            .unwrap()
+        } else {
+            expr
+        }
+    }
+
+    /// Evaluate the expression `expr` based on the currently written operations.
+    fn eval_written(&self, expr: impl Into<Expr<C>> + AsRef<Expr<C>>) -> Option<Expr<C>> {
+        if expr
+            .as_ref()
+            .variables()
+            .any(|x| self.written.contains_key(&x))
+        {
+            expr.as_ref().symb_evaluate(|i| self.get_written(i))
+        } else {
+            Some(expr.into())
+        }
+    }
+
+    /// Evaluate the expression `expr` based on the currently pending operations.
+    fn eval_pending(&self, shift: isize, expr: impl Into<Expr<C>> + AsRef<Expr<C>>) -> Expr<C> {
+        if expr.as_ref().variables().any(|x| {
+            self.pending.contains_key(&(x + shift))
+                || self.get_written_constant(x + shift).is_some()
+        }) {
+            expr.as_ref()
+                .symb_evaluate(|x| Some(self.get_pending(x + shift)))
+                .unwrap()
+        } else if shift != 0 {
+            let mut res = expr.into();
+            for var in res.variables_mut() {
+                *var += shift;
+            }
+            res
+        } else {
+            expr.into()
+        }
+    }
+
+    /// Return true if the currently written values of the two expressions are
+    /// always the same. If equivalence is not guaranteed, false will be returned.
+    fn compare_written(
+        &self,
+        a: impl AsRef<Expr<C>> + Into<Expr<C>>,
+        b: impl AsRef<Expr<C>> + Into<Expr<C>>,
+    ) -> bool {
+        if a.as_ref() == b.as_ref() {
+            true
+        } else {
+            let a = self.eval_written(a);
+            let b = self.eval_written(b);
+            a.is_some() && a == b
+        }
+    }
+
     /// Return true if the values of the two expressions are always the same if
     /// evaluated given the current state. If equivalence is not guaranteed,
     /// false will be returned.
-    fn compare(&self, a: &Expr<C>, b: &Expr<C>) -> bool {
-        if a == b {
-            return true;
+    fn compare(
+        &self,
+        a: impl AsRef<Expr<C>> + Into<Expr<C>>,
+        b: impl AsRef<Expr<C>> + Into<Expr<C>>,
+    ) -> bool {
+        if a.as_ref() == b.as_ref() {
+            true
+        } else {
+            let a = self.eval_pending(0, a);
+            let b = self.eval_pending(0, b);
+            self.compare_written(a, b)
         }
-        let a = a.symb_evaluate(|i| Some(self.get_pending(i))).unwrap();
-        let b = b.symb_evaluate(|i| Some(self.get_pending(i))).unwrap();
-        if a == b {
-            return true;
-        }
-        let a = a.symb_evaluate(|i| self.get_written(i));
-        let b = b.symb_evaluate(|i| self.get_written(i));
-        if a.is_some() && a == b {
-            return true;
-        }
-        return false;
     }
 
     /// Analyze how often the loop with the given state will be executed given
@@ -469,7 +541,7 @@ impl<C: CellType> OptRebuild<C> {
                     }
                 } else {
                     if let Some(inv) = inc.wrapping_neg().wrapping_inv() {
-                        OptLoop::expr(Expr::val(inv).mul(&Expr::var(cond)))
+                        OptLoop::expr(Expr::val(inv).mul(Expr::var(cond)))
                     } else if inc == C::ZERO {
                         OptLoop::infinite(at_least_once)
                     } else {
@@ -502,52 +574,43 @@ impl<C: CellType> OptRebuild<C> {
         if constant.contains(&var) && complete {
             return [None, None, None];
         }
-        let pending = pending
-            .symb_evaluate(|i| {
-                if constant.contains(&i) {
-                    if let Some(c) = self.get_constant(i) {
-                        return Some(Expr::val(c));
-                    }
-                }
-                Some(Expr::var(i))
-            })
-            .unwrap();
+        let pending = self.reduce_const(pending, constant);
         let used_vars = pending.variables().collect::<HashSet<_>>();
         if !reads.contains(&var) {
             if complete {
                 if let Some(expr) = &loop_anal.expr {
                     if let Some(inc) = pending.inc_of(var) {
                         let (constant, other, linears) = inc.split_along(constant, linear);
-                        let mut before = constant.mul(expr);
+                        let mut before = expr.mul(constant);
                         let mut after = other;
-                        let expr_neg_one = expr.add(&Expr::val(C::NEG_ONE));
+                        let expr_neg_one = expr.add(Expr::val(C::NEG_ONE));
                         for (initial, increment) in linears {
                             if let Some(inc) = increment.half() {
-                                before = before
-                                    .add(&initial.mul(expr))
-                                    .add(&inc.mul(expr).mul(&expr_neg_one));
+                                before = expr
+                                    .mul(initial)
+                                    .add(before.add(expr.mul(expr_neg_one.mul(inc))));
                             } else if let Some(inc) = expr.half() {
-                                before = before
-                                    .add(&initial.mul(expr))
-                                    .add(&inc.mul(&increment).mul(&expr_neg_one));
+                                before = expr
+                                    .mul(initial)
+                                    .add(before.add(expr_neg_one.mul(increment.mul(inc))));
                             } else if let Some(inc) = expr_neg_one.half() {
-                                before = before
-                                    .add(&initial.mul(expr))
-                                    .add(&inc.mul(expr).mul(&increment));
+                                before = expr
+                                    .mul(initial)
+                                    .add(before.add(expr.mul(increment.mul(inc))));
                             } else {
-                                after = after.add(&initial);
+                                after = after.add(initial);
                             }
                         }
                         return [
-                            Some(Expr::var(var).add(&before)),
-                            Some(Expr::var(var).add(&after)),
+                            Some(Expr::var(var).add(before)),
+                            Some(Expr::var(var).add(after)),
                             None,
                         ];
                     }
                     if let Some(c) = expr.constant() {
                         if let Some(m) = pending.const_prod_of(var) {
                             return [
-                                Some(Expr::val(m.wrapping_pow(c)).mul(&Expr::var(var))),
+                                Some(Expr::val(m.wrapping_pow(c)).mul(Expr::var(var))),
                                 None,
                                 None,
                             ];
@@ -694,9 +757,9 @@ impl<C: CellType> OptRebuild<C> {
         for var in vars {
             if let Some(write) = sub_state.written.get(&var) {
                 if let OptWrite::Known(written) = write {
-                    if self.compare(&Expr::var(var), written) {
+                    if self.compare(Expr::var(var), written) {
                         if let Some(pending) = sub_state.pending.get(&var) {
-                            if self.compare(&Expr::var(var), pending) {
+                            if self.compare(Expr::var(var), pending) {
                                 check_constant(
                                     var,
                                     || written.variables().chain(pending.variables()),
@@ -717,7 +780,7 @@ impl<C: CellType> OptRebuild<C> {
                     }
                 }
             } else if let Some(pending) = sub_state.pending.get(&var) {
-                if self.compare(&Expr::var(var), pending) {
+                if self.compare(Expr::var(var), pending) {
                     check_constant(
                         var,
                         || pending.variables(),
@@ -892,6 +955,7 @@ impl<C: CellType> OptRebuild<C> {
 }
 
 impl<C: CellType> Program<C> {
+    /// Perform one iteration of optimization and return the new program.
     fn optimize_once(&self) -> Self {
         let mut state = OptRebuild::new(0, None);
         state.rebuild_block(self);

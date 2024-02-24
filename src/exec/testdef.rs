@@ -126,33 +126,51 @@ macro_rules! executor_tests {
     };
 }
 
-// This is not actually unused, but the compiler seems to think it is.
+// The following are not actually unused, but the compiler seems to think it is.
+#[allow(unused_macros)]
+macro_rules! same_as_inplace_test_inner {
+    ($i:ident, $c:expr) => {
+        let code = $c;
+        let mut input = Vec::new();
+        for i in 0..1024 {
+            input.push((183 * i) as u8);
+        }
+        let mut out_inplace = input.clone();
+        let mut out_to_test = input.clone();
+        let mut ctx_inplace = Context::<u8>::new(
+            Some(Box::new(&input[..])),
+            Some(Box::new(&mut out_inplace[..])),
+        );
+        let mut ctx_to_test = Context::<u8>::new(
+            Some(Box::new(&input[..])),
+            Some(Box::new(&mut out_to_test[..])),
+        );
+        InplaceInterpreter::<u8>::create(code, false, 3)?.execute(&mut ctx_inplace)?;
+        $i::<u8>::create(code, false, 3)?.execute(&mut ctx_to_test)?;
+        drop(ctx_inplace);
+        drop(ctx_to_test);
+        assert_eq!(out_to_test, out_inplace);
+        return Ok(());
+    };
+}
+
 #[allow(unused_macros)]
 macro_rules! same_as_inplace_test {
     ($i:ident, $c:expr, $n:ident) => {
         #[test]
         fn $n() -> Result<(), Error<'static>> {
-            let code = $c;
-            let mut input = Vec::new();
-            for i in 0..1024 {
-                input.push((183 * i) as u8);
-            }
-            let mut out_inplace = input.clone();
-            let mut out_to_test = input.clone();
-            let mut ctx_inplace = Context::<u8>::new(
-                Some(Box::new(&input[..])),
-                Some(Box::new(&mut out_inplace[..])),
-            );
-            let mut ctx_to_test = Context::<u8>::new(
-                Some(Box::new(&input[..])),
-                Some(Box::new(&mut out_to_test[..])),
-            );
-            InplaceInterpreter::<u8>::create(code, false, 3)?.execute(&mut ctx_inplace)?;
-            $i::<u8>::create(code, false, 3)?.execute(&mut ctx_to_test)?;
-            drop(ctx_inplace);
-            drop(ctx_to_test);
-            assert_eq!(out_to_test, out_inplace);
-            Ok(())
+            same_as_inplace_test_inner!($i, $c);
+        }
+    };
+}
+
+#[allow(unused_macros)]
+macro_rules! same_as_inplace_test_no_miri {
+    ($i:ident, $c:expr, $n:ident) => {
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn $n() -> Result<(), Error<'static>> {
+            same_as_inplace_test_inner!($i, $c);
         }
     };
 }
@@ -227,7 +245,7 @@ macro_rules! same_as_inplace_tests {
             );
 
             // Manually created test cases.
-            same_as_inplace_test!(
+            same_as_inplace_test_no_miri!(
                 $i,
                 "+[,>,>,>[-]>[-]>[-]<<<<<[>[>>+>+<<<-]>>>[<<<+>>>-]<<<<-]>[>
                 [>+>+<<-]>>[<<+>>-]<<<-]>>[>+<-]>[-[>+<<++>-]<+>>[<+>-]<]<+

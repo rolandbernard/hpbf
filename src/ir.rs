@@ -4,6 +4,7 @@ use std::fmt::{self, Debug};
 
 use crate::{
     hasher::{HashMap, HashSet},
+    smallvec::SmallVec,
     CellType, Error, ErrorKind,
 };
 
@@ -12,7 +13,7 @@ use crate::{
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ExprPart<C: CellType> {
     coef: C,
-    vars: Vec<isize>,
+    vars: SmallVec<isize, 1>,
 }
 
 /// An expression used in the IR to represent a calculation. Expressions in the
@@ -20,7 +21,7 @@ pub struct ExprPart<C: CellType> {
 /// This ensures that two equivalent expressions compare ans hash equals.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Expr<C: CellType> {
-    parts: Vec<ExprPart<C>>,
+    parts: SmallVec<ExprPart<C>, 2>,
 }
 
 /// Represents a complete Brainfuck program.
@@ -38,21 +39,38 @@ pub struct Block<C: CellType> {
 /// in Brainfuck and help the backend to generate better code.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum Instr<C: CellType> {
-    Output { src: isize },
-    Input { dst: isize },
-    Calc { calcs: Vec<(isize, Expr<C>)> },
-    Loop { cond: isize, block: Block<C> },
-    If { cond: isize, block: Block<C> },
+    Output {
+        src: isize,
+    },
+    Input {
+        dst: isize,
+    },
+    Calc {
+        calcs: SmallVec<(isize, Expr<C>), 1>,
+    },
+    Loop {
+        cond: isize,
+        block: Block<C>,
+    },
+    If {
+        cond: isize,
+        block: Block<C>,
+    },
 }
 
 impl<C: CellType> Expr<C> {
     /// Return the expression representing the constant value given by `coef`.
     pub fn val(coef: C) -> Self {
         if coef == C::ZERO {
-            Expr { parts: vec![] }
+            Expr {
+                parts: SmallVec::new(),
+            }
         } else {
             Expr {
-                parts: vec![ExprPart { coef, vars: vec![] }],
+                parts: SmallVec::with(ExprPart {
+                    coef,
+                    vars: SmallVec::new(),
+                }),
             }
         }
     }
@@ -60,93 +78,151 @@ impl<C: CellType> Expr<C> {
     /// Return the expression representing the value at memory offset `var`.
     pub fn var(var: isize) -> Self {
         Expr {
-            parts: vec![ExprPart {
+            parts: SmallVec::with(ExprPart {
                 coef: C::ONE,
-                vars: vec![var],
-            }],
+                vars: SmallVec::with(var),
+            }),
         }
     }
 
     /// Special detection of e.g. 128*x + 129*x*x which is equivalent to x*x.
     /// For now, only do this when it enables us to eliminate a multiplication
     /// or even a complete term.
-    fn special_normalization_rules(parts: &mut HashMap<Vec<isize>, C>) {
-        if parts.len() >= 2 && parts.iter().any(|(vs, c)| vs.len() >= 2 && *c != C::ZERO) {
+    pub fn normalize(mut self) -> Self {
+        if !self.parts.is_empty() && self.parts.iter().any(|p| p.vars.len() >= 2) {
             let half_mod = C::ONE.wrapping_shl(C::BITS - 1);
             let half_mod_p = half_mod.wrapping_add(C::ONE);
             let half_mod_m = half_mod.wrapping_add(C::NEG_ONE);
-            if parts.iter().any(|(vs, c)| {
-                !vs.is_empty() && (*c == half_mod || *c == half_mod_p || *c == half_mod_m)
-            }) {
-                for vars in parts
-                    .iter()
-                    .filter(|(v, c)| v.len() >= 2 && *c != &C::ZERO)
-                    .map(|(v, _)| v.clone())
-                    .collect::<Vec<_>>()
-                {
-                    for i in 0..vars.len() {
-                        let vars_m = vars
-                            .iter()
-                            .enumerate()
-                            .filter(|(j, _)| *j != i)
-                            .map(|(_, v)| *v)
-                            .collect::<Vec<_>>();
-                        if let (Some(&coef), Some(&coef_m)) = (parts.get(&vars), parts.get(&vars_m))
-                        {
-                            if (coef != C::ZERO && (coef_m != C::ZERO || coef == half_mod))
-                                && (coef == half_mod
-                                    || coef == half_mod_p
-                                    || coef == half_mod_m
-                                    || coef_m == half_mod
-                                    || coef_m == half_mod_p
-                                    || coef_m == half_mod_m)
-                            {
-                                *parts.get_mut(&vars).unwrap() = coef.wrapping_add(half_mod);
-                                *parts.get_mut(&vars_m).unwrap() = coef_m.wrapping_add(half_mod);
-                            }
+            if self
+                .parts
+                .iter()
+                .any(|p| p.vars.len() >= 2 && p.coef == half_mod)
+            {
+                let mut need_elim = false;
+                for part in &mut self.parts {
+                    if part.coef == half_mod {
+                        let prev_len = part.vars.len();
+                        part.vars.dedup();
+                        if prev_len != part.vars.len() {
+                            need_elim = true;
                         }
                     }
                 }
+                if need_elim {
+                    self.parts.sort_by(|a, b| a.vars.cmp(&b.vars));
+                    for chunk in self.parts.chunk_by_mut(|p1, p2| p1.vars == p2.vars) {
+                        for i in 1..chunk.len() {
+                            chunk[0].coef = chunk[0].coef.wrapping_add(chunk[i].coef);
+                            chunk[i].coef = C::ZERO;
+                        }
+                    }
+                    self.parts.retain(|p| p.coef != C::ZERO);
+                }
+            }
+            if self
+                .parts
+                .iter()
+                .any(|p| !p.vars.is_empty() && (p.coef <= half_mod_p || p.coef >= half_mod_m))
+            {
+                let mut need_elim = false;
+                let mut by_reduced = HashMap::<SmallVec<isize, 1>, SmallVec<usize, 1>>::new();
+                for i in 0..self.parts.len() {
+                    if !self.parts[i].vars.is_empty() {
+                        let mut vars = self.parts[i].vars.clone();
+                        vars.dedup();
+                        if let Some(others) = by_reduced.get_mut(&vars) {
+                            for &j in others.iter() {
+                                if ((self.parts[i].coef <= half_mod_p
+                                    || self.parts[i].coef >= half_mod_m)
+                                    && (self.parts[j].coef > C::ONE
+                                        || self.parts[j].coef < C::NEG_ONE))
+                                    || ((self.parts[i].coef > C::ONE
+                                        && self.parts[i].coef < C::NEG_ONE)
+                                        && (self.parts[j].coef <= half_mod_p
+                                            || self.parts[j].coef >= half_mod_m))
+                                {
+                                    let new_coef_i = self.parts[i].coef.wrapping_add(half_mod);
+                                    let new_coef_j = self.parts[j].coef.wrapping_add(half_mod);
+                                    self.parts[i].coef = new_coef_i;
+                                    self.parts[j].coef = new_coef_j;
+                                    if new_coef_i == C::ZERO || new_coef_j == C::ZERO {
+                                        need_elim = true;
+                                    }
+                                }
+                            }
+                            others.push(i);
+                        } else {
+                            by_reduced.insert(vars, SmallVec::<_, 1>::with(i));
+                        }
+                    }
+                }
+                if need_elim {
+                    self.parts.retain(|p| p.coef != C::ZERO);
+                }
             }
         }
+        return self;
     }
 
     /// Multiply two expressions and return the resulting expressions.
-    pub fn mul(&self, other: &Self) -> Self {
-        let mut parts = HashMap::with_capacity(self.parts.len() * other.parts.len());
-        for self_part in &self.parts {
-            for other_part in &other.parts {
-                let mut vars = self_part.vars.clone();
-                vars.extend(other_part.vars.iter().copied());
-                vars.sort();
-                let coef = self_part.coef.wrapping_mul(other_part.coef);
-                let v = parts.entry(vars).or_insert(C::ZERO);
-                *v = v.wrapping_add(coef);
+    pub fn mul(&self, other: impl AsRef<Self> + Into<Self>) -> Self {
+        if self.parts.is_empty() || other.as_ref().parts.is_empty() {
+            return Expr::val(C::ZERO);
+        } else if self.parts.len() == 1 {
+            let mut res = other.into();
+            res.parts.retain_mut(|ExprPart { coef, vars }| {
+                vars.extend(self.parts[0].vars.iter().copied());
+                *coef = coef.wrapping_mul(self.parts[0].coef);
+                *coef != C::ZERO
+            });
+            return res;
+        } else if other.as_ref().parts.len() == 1 {
+            let mut res = self.clone();
+            res.parts.retain_mut(|ExprPart { coef, vars }| {
+                vars.extend(other.as_ref().parts[0].vars.iter().copied());
+                *coef = coef.wrapping_mul(other.as_ref().parts[0].coef);
+                *coef != C::ZERO
+            });
+            return res;
+        } else {
+            let mut parts = HashMap::with_capacity(self.parts.len() * other.as_ref().parts.len());
+            for self_part in &self.parts {
+                for other_part in &other.as_ref().parts {
+                    let mut vars = self_part.vars.clone();
+                    vars.extend(other_part.vars.iter().copied());
+                    vars.sort();
+                    let coef = self_part.coef.wrapping_mul(other_part.coef);
+                    let v = parts.entry(vars).or_insert(C::ZERO);
+                    *v = v.wrapping_add(coef);
+                }
             }
+            let mut parts_vec = SmallVec::new();
+            parts_vec.extend(
+                parts
+                    .into_iter()
+                    .filter(|(_, coef)| *coef != C::ZERO)
+                    .map(|(vars, coef)| ExprPart { coef, vars }),
+            );
+            parts_vec.sort_by(|a, b| a.vars.cmp(&b.vars));
+            Expr { parts: parts_vec }
         }
-        Self::special_normalization_rules(&mut parts);
-        let mut parts = parts
-            .into_iter()
-            .filter(|(_, coef)| *coef != C::ZERO)
-            .map(|(vars, coef)| ExprPart { coef, vars })
-            .collect::<Vec<_>>();
-        parts.sort_by(|a, b| a.vars.cmp(&b.vars));
-        Expr { parts }
     }
 
     /// Add two expressions and return the resulting expressions.
-    pub fn add(&self, other: &Self) -> Self {
+    pub fn add(&self, other: impl AsRef<Self>) -> Self {
         let (mut i, mut j) = (0, 0);
-        let mut parts = Vec::with_capacity(self.parts.len() + other.parts.len());
-        while i < self.parts.len() && j < other.parts.len() {
-            if self.parts[i].vars < other.parts[j].vars {
+        let mut parts = SmallVec::new();
+        while i < self.parts.len() && j < other.as_ref().parts.len() {
+            if self.parts[i].vars < other.as_ref().parts[j].vars {
                 parts.push(self.parts[i].clone());
                 i += 1;
-            } else if self.parts[i].vars > other.parts[j].vars {
-                parts.push(other.parts[j].clone());
+            } else if self.parts[i].vars > other.as_ref().parts[j].vars {
+                parts.push(other.as_ref().parts[j].clone());
                 j += 1;
             } else {
-                let coef = self.parts[i].coef.wrapping_add(other.parts[j].coef);
+                let coef = self.parts[i]
+                    .coef
+                    .wrapping_add(other.as_ref().parts[j].coef);
                 if coef != C::ZERO {
                     parts.push(ExprPart {
                         coef,
@@ -161,8 +237,8 @@ impl<C: CellType> Expr<C> {
             parts.push(self.parts[i].clone());
             i += 1;
         }
-        while j < other.parts.len() {
-            parts.push(other.parts[j].clone());
+        while j < other.as_ref().parts.len() {
+            parts.push(other.as_ref().parts[j].clone());
             j += 1;
         }
         Expr { parts }
@@ -170,29 +246,21 @@ impl<C: CellType> Expr<C> {
 
     /// Wrapping negate all coefficients.
     pub fn neg(&self) -> Self {
-        Expr {
-            parts: self
-                .parts
-                .iter()
-                .map(|part| ExprPart {
-                    coef: part.coef.wrapping_neg(),
-                    vars: part.vars.clone(),
-                })
-                .collect(),
+        let mut res = self.clone();
+        for part in &mut res.parts {
+            part.coef = part.coef.wrapping_neg();
         }
+        res
     }
 
     /// Try to divide by two. This is only possible if all coefficients are off.
     pub fn half(&self) -> Option<Self> {
         if self.parts.iter().all(|part| !part.coef.is_odd()) {
-            let mut parts = Vec::with_capacity(self.parts.len());
-            for part in &self.parts {
-                parts.push(ExprPart {
-                    coef: part.coef.wrapping_shr(1),
-                    vars: part.vars.clone(),
-                });
+            let mut res = self.clone();
+            for part in &mut res.parts {
+                part.coef = part.coef.wrapping_shr(1);
             }
-            Some(Expr { parts })
+            Some(res)
         } else {
             None
         }
@@ -205,7 +273,7 @@ impl<C: CellType> Expr<C> {
     /// # use hpbf::{Expr};
     /// let expr = Expr::<u8>::val(5);
     /// assert_eq!(expr.constant(), Some(5));
-    /// let expr = Expr::<u8>::var(0).add(&Expr::<u8>::val(5));
+    /// let expr = Expr::<u8>::var(0).add(Expr::<u8>::val(5));
     /// assert_eq!(expr.constant(), None);
     /// ```
     pub fn constant(&self) -> Option<C> {
@@ -224,10 +292,10 @@ impl<C: CellType> Expr<C> {
     /// # Examples
     /// ```
     /// # use hpbf::{Expr};
-    /// let expr = Expr::<u8>::var(0).add(&Expr::<u8>::val(5));
+    /// let expr = Expr::<u8>::var(0).add(Expr::<u8>::val(5));
     /// assert_eq!(expr.inc_of(0), Some(Expr::val(5)));
     /// assert_eq!(expr.inc_of(1), None);
-    /// let expr = Expr::<u8>::var(0).mul(&Expr::<u8>::val(5));
+    /// let expr = Expr::<u8>::var(0).mul(Expr::<u8>::val(5));
     /// assert_eq!(expr.inc_of(0), None);
     /// ```
     pub fn inc_of(&self, var: isize) -> Option<Self> {
@@ -240,14 +308,14 @@ impl<C: CellType> Expr<C> {
                 .iter()
                 .all(|part| !part.vars.contains(&var) || part.vars.len() == 1)
         {
-            Some(Expr {
-                parts: self
-                    .parts
+            let mut parts = SmallVec::with_capacity(self.parts.len() - 1);
+            parts.extend(
+                self.parts
                     .iter()
                     .filter(|part| part.vars.len() != 1 || part.vars[0] != var)
-                    .cloned()
-                    .collect(),
-            })
+                    .cloned(),
+            );
+            Some(Expr { parts })
         } else {
             None
         }
@@ -260,9 +328,9 @@ impl<C: CellType> Expr<C> {
         constant: &HashSet<isize>,
         linear: &HashMap<isize, Self>,
     ) -> (Self, Self, Vec<(Self, Self)>) {
-        let mut const_parts = Vec::new();
+        let mut const_parts = SmallVec::new();
+        let mut other_parts = SmallVec::new();
         let mut linear_parts = Vec::new();
-        let mut other_parts = Vec::new();
         for part in &self.parts {
             if part.vars.iter().all(|v| constant.contains(v)) {
                 const_parts.push(part.clone());
@@ -273,21 +341,18 @@ impl<C: CellType> Expr<C> {
                 && part.vars.iter().filter(|x| !constant.contains(x)).count() == 1
             {
                 let lin_var = part.vars.iter().find(|x| !constant.contains(x)).unwrap();
+                let mut vars = SmallVec::with_capacity(part.vars.len() - 1);
+                vars.extend(part.vars.iter().filter(|&x| x != lin_var).copied());
                 let increment = ExprPart {
                     coef: part.coef,
-                    vars: part
-                        .vars
-                        .iter()
-                        .filter(|&x| x != lin_var)
-                        .copied()
-                        .collect(),
+                    vars,
                 };
                 linear_parts.push((
                     Expr {
-                        parts: vec![part.clone()],
+                        parts: SmallVec::with(part.clone()),
                     },
                     Expr {
-                        parts: vec![increment],
+                        parts: SmallVec::with(increment),
                     }
                     .mul(&linear[lin_var]),
                 ));
@@ -309,11 +374,11 @@ impl<C: CellType> Expr<C> {
     /// # use hpbf::{Expr};
     /// let expr = Expr::<u8>::val(5);
     /// assert_eq!(expr.const_inc_of(0), None);
-    /// let expr = Expr::<u8>::var(0).add(&Expr::<u8>::val(5));
+    /// let expr = Expr::<u8>::var(0).add(Expr::<u8>::val(5));
     /// assert_eq!(expr.const_inc_of(0), Some(5));
-    /// let expr = Expr::<u8>::var(0).add(&Expr::<u8>::var(5));
+    /// let expr = Expr::<u8>::var(0).add(Expr::<u8>::var(5));
     /// assert_eq!(expr.const_inc_of(0), None);
-    /// let expr = Expr::<u8>::var(0).mul(&Expr::<u8>::val(5));
+    /// let expr = Expr::<u8>::var(0).mul(Expr::<u8>::val(5));
     /// assert_eq!(expr.const_inc_of(0), None);
     /// ```
     pub fn const_inc_of(&self, var: isize) -> Option<C> {
@@ -341,10 +406,10 @@ impl<C: CellType> Expr<C> {
     /// # Examples
     /// ```
     /// # use hpbf::{Expr};
-    /// let expr = Expr::<u8>::var(0).mul(&Expr::<u8>::val(5));
+    /// let expr = Expr::<u8>::var(0).mul(Expr::<u8>::val(5));
     /// assert_eq!(expr.prod_of(0), Some(Expr::val(5)));
     /// assert_eq!(expr.prod_of(1), None);
-    /// let expr = Expr::<u8>::var(0).add(&Expr::<u8>::val(5));
+    /// let expr = Expr::<u8>::var(0).add(Expr::<u8>::val(5));
     /// assert_eq!(expr.prod_of(0), None);
     /// ```
     pub fn prod_of(&self, var: isize) -> Option<Self> {
@@ -353,16 +418,16 @@ impl<C: CellType> Expr<C> {
             .iter()
             .all(|part| part.vars.iter().filter(|&x| x == &var).count() == 1)
         {
-            Some(Expr {
-                parts: self
-                    .parts
-                    .iter()
-                    .map(|part| ExprPart {
-                        coef: part.coef,
-                        vars: part.vars.iter().copied().filter(|&v| v != var).collect(),
-                    })
-                    .collect(),
-            })
+            let mut parts = SmallVec::with_capacity(self.parts.len());
+            for part in &self.parts {
+                let mut vars = SmallVec::with_capacity(part.vars.len() - 1);
+                vars.extend(part.vars.iter().copied().filter(|&v| v != var));
+                parts.push(ExprPart {
+                    coef: part.coef,
+                    vars,
+                });
+            }
+            Some(Expr { parts })
         } else {
             None
         }
@@ -375,9 +440,9 @@ impl<C: CellType> Expr<C> {
     /// # use hpbf::{Expr};
     /// let expr = Expr::<u8>::val(5);
     /// assert_eq!(expr.const_prod_of(0), None);
-    /// let expr = Expr::<u8>::var(0).mul(&Expr::<u8>::val(5));
+    /// let expr = Expr::<u8>::var(0).mul(Expr::<u8>::val(5));
     /// assert_eq!(expr.const_prod_of(0), Some(5));
-    /// let expr = Expr::<u8>::var(0).mul(&Expr::<u8>::var(5));
+    /// let expr = Expr::<u8>::var(0).mul(Expr::<u8>::var(5));
     /// assert_eq!(expr.const_prod_of(0), None);
     /// ```
     pub fn const_prod_of(&self, var: isize) -> Option<C> {
@@ -417,6 +482,56 @@ impl<C: CellType> Expr<C> {
         return val;
     }
 
+    /// Multiply the two expressions continuing the given parts.
+    /// Only for internal use.
+    fn mul_parts(
+        mut left: SmallVec<ExprPart<C>, 2>,
+        mut right: SmallVec<ExprPart<C>, 2>,
+    ) -> SmallVec<ExprPart<C>, 2> {
+        if left.is_empty() {
+            right.clear();
+            return right;
+        } else if right.is_empty() {
+            left.clear();
+            return left;
+        } else if left.len() == 1 {
+            right.retain_mut(|ExprPart { vars, coef }| {
+                vars.extend(left[0].vars.iter().copied());
+                vars.sort();
+                *coef = coef.wrapping_mul(left[0].coef);
+                *coef != C::ZERO
+            });
+            return right;
+        } else if right.len() == 1 {
+            left.retain_mut(|ExprPart { vars, coef }| {
+                vars.extend(right[0].vars.iter().copied());
+                vars.sort();
+                *coef = coef.wrapping_mul(right[0].coef);
+                *coef != C::ZERO
+            });
+            return left;
+        } else {
+            let mut new_partial = HashMap::new();
+            for ExprPart { vars, coef } in right {
+                for var_part in &left {
+                    let mut vars = vars.clone();
+                    vars.extend(var_part.vars.iter().copied());
+                    vars.sort();
+                    let v = new_partial.entry(vars).or_insert(C::ZERO);
+                    *v = v.wrapping_add(coef.wrapping_mul(var_part.coef));
+                }
+            }
+            left.clear();
+            left.extend(
+                new_partial
+                    .into_iter()
+                    .filter(|(_, coef)| *coef != C::ZERO)
+                    .map(|(vars, coef)| ExprPart { coef, vars }),
+            );
+            return left;
+        }
+    }
+
     /// Evaluate the expression by taking getting variable values from the
     /// provided function. This differs from [`Self::evaluate`] in that the
     /// values returned for the variables are in turn expressions.
@@ -432,41 +547,18 @@ impl<C: CellType> Expr<C> {
             let mut parts = HashMap::with_capacity(self.parts.len());
             for part in &self.parts {
                 if part.vars.is_empty() {
-                    let v = parts.entry(vec![]).or_insert(C::ZERO);
+                    let v = parts.entry(SmallVec::new()).or_insert(C::ZERO);
                     *v = v.wrapping_add(part.coef);
                 } else if part.vars.len() == 1 {
                     for var_part in func(part.vars[0])?.parts {
-                        let v = parts.entry(var_part.vars).or_insert(C::ZERO);
+                        let v = parts.entry(var_part.vars.clone()).or_insert(C::ZERO);
                         *v = v.wrapping_add(part.coef.wrapping_mul(var_part.coef));
                     }
                 } else {
                     let mut partial = func(part.vars[0])?.parts;
                     for &var in part.vars.iter().skip(1) {
                         let var_parts = func(var)?.parts;
-                        if var_parts.is_empty() {
-                            partial.clear();
-                        } else if var_parts.len() == 1 {
-                            for ExprPart { vars, coef } in &mut partial {
-                                vars.extend(var_parts[0].vars.iter().copied());
-                                vars.sort();
-                                *coef = coef.wrapping_mul(var_parts[0].coef);
-                            }
-                        } else {
-                            let mut new_partial = HashMap::new();
-                            for ExprPart { vars, coef } in partial {
-                                for var_part in &var_parts {
-                                    let mut vars = vars.clone();
-                                    vars.extend(var_part.vars.iter().copied());
-                                    vars.sort();
-                                    let v = new_partial.entry(vars).or_insert(C::ZERO);
-                                    *v = v.wrapping_add(coef.wrapping_mul(var_part.coef));
-                                }
-                            }
-                            partial = new_partial
-                                .into_iter()
-                                .map(|(vars, coef)| ExprPart { coef, vars })
-                                .collect::<Vec<_>>();
-                        }
+                        partial = Self::mul_parts(partial, var_parts);
                     }
                     for ExprPart { vars, coef } in partial {
                         let v = parts.entry(vars).or_insert(C::ZERO);
@@ -474,20 +566,26 @@ impl<C: CellType> Expr<C> {
                     }
                 }
             }
-            Self::special_normalization_rules(&mut parts);
-            let mut parts = parts
-                .into_iter()
-                .filter(|(_, coef)| *coef != C::ZERO)
-                .map(|(vars, coef)| ExprPart { coef, vars })
-                .collect::<Vec<_>>();
-            parts.sort_by(|a, b| a.vars.cmp(&b.vars));
-            Some(Expr { parts })
+            let mut parts_vec = SmallVec::new();
+            parts_vec.extend(
+                parts
+                    .into_iter()
+                    .filter(|(_, coef)| *coef != C::ZERO)
+                    .map(|(vars, coef)| ExprPart { coef, vars }),
+            );
+            parts_vec.sort_by(|a, b| a.vars.cmp(&b.vars));
+            Some(Expr { parts: parts_vec })
         }
     }
 
     /// Return an iterator over all the variables used in this expression.
     pub fn variables<'a>(&'a self) -> impl Iterator<Item = isize> + 'a {
         self.parts.iter().flat_map(|part| part.vars.iter()).copied()
+    }
+
+    /// Return an iterator over all the variables used in this expression.
+    pub fn variables_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut isize> + 'a {
+        self.parts.iter_mut().flat_map(|part| part.vars.iter_mut())
     }
 }
 
@@ -496,7 +594,7 @@ impl<C: CellType> Instr<C> {
     /// variable `var`.
     pub fn load(var: isize, val: C) -> Instr<C> {
         Instr::Calc {
-            calcs: vec![(var, Expr::val(val))],
+            calcs: SmallVec::with((var, Expr::val(val))),
         }
     }
 
@@ -504,7 +602,21 @@ impl<C: CellType> Instr<C> {
     /// value already in the variable `var`.
     pub fn add(var: isize, val: C) -> Instr<C> {
         Instr::Calc {
-            calcs: vec![(var, Expr::val(val).add(&Expr::var(var)))],
+            calcs: SmallVec::with((
+                var,
+                Expr {
+                    parts: SmallVec::with_all([
+                        ExprPart {
+                            coef: val,
+                            vars: SmallVec::new(),
+                        },
+                        ExprPart {
+                            coef: C::ONE,
+                            vars: SmallVec::with(var),
+                        },
+                    ]),
+                },
+            )),
         }
     }
 }
@@ -778,6 +890,18 @@ impl<C: CellType> Block<C> {
 impl<C: CellType> Debug for Program<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.print_block(f, 0)
+    }
+}
+
+impl<C: CellType> AsRef<Expr<C>> for Expr<C> {
+    fn as_ref(&self) -> &Expr<C> {
+        self
+    }
+}
+
+impl<C: CellType> Into<Expr<C>> for &Expr<C> {
+    fn into(self) -> Expr<C> {
+        self.clone()
     }
 }
 
