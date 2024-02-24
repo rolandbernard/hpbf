@@ -5,11 +5,11 @@ use crate::{CellType, Context, Error};
 #[macro_use]
 mod testdef;
 
-mod baseint;
 mod inplace;
+mod irint;
 
-pub use baseint::BaseInterpreter;
 pub use inplace::InplaceInterpreter;
+pub use irint::BaseInterpreter;
 
 /// Trait implemented by the different execution strategies provided by this crate.
 pub trait Executor<'p, C: CellType>: Sized {

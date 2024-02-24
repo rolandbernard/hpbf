@@ -88,7 +88,7 @@ fn main() {
     let mut print_ir = false;
     let mut kind = ExecutorKind::BaseInt;
     let mut no_opt = false;
-    let mut opt = 1;
+    let mut opt = 2;
     let mut has_error = false;
     let mut next_is_file = false;
     let mut code = String::new();

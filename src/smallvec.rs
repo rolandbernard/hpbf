@@ -37,7 +37,7 @@ impl<T, const N: usize> SmallVec<T, N> {
         Self {
             size: 0,
             data: SmallVecData {
-                // SAFETY: The array elements are still uninitialized.
+                // Safety: The array elements are still uninitialized.
                 arr: unsafe { MaybeUninit::uninit().assume_init() },
             },
         }
@@ -90,11 +90,11 @@ impl<T, const N: usize> SmallVec<T, N> {
     unsafe fn push_promote(me: &mut Self, elem: T) {
         let mut vs = Vec::with_capacity(N + 1);
         for elem in &mut *me.data.arr {
-            // SAFETY: All elements have been initialized.
+            // Safety: All elements have been initialized.
             vs.push(elem.assume_init_read());
         }
         vs.push(elem);
-        // SAFETY: We use write only to prevent the drop of self.
+        // Safety: We use write only to prevent the drop of self.
         ptr::from_mut(me).write(SmallVec {
             size: N as u8 + 1,
             data: SmallVecData {
@@ -113,18 +113,18 @@ impl<T, const N: usize> SmallVec<T, N> {
     /// Insert the given element `elem` at the end of the vector.
     pub fn push(&mut self, elem: T) {
         if (self.size as usize) < N {
-            // SAFETY: If `size` <= `N` we have a small representation.
+            // Safety: If `size` <= `N` we have a small representation.
             unsafe {
                 (*self.data.arr)[self.size as usize].write(elem);
             }
             self.size += 1;
         } else if self.size as usize == N {
-            // SAFETY: If `size` <= `N` we have a small representation.
+            // Safety: If `size` <= `N` we have a small representation.
             unsafe {
                 Self::push_promote(self, elem);
             }
         } else {
-            // SAFETY: If `size` > `N` we have a large representation.
+            // Safety: If `size` > `N` we have a large representation.
             unsafe {
                 Self::push_to_vec(&mut self.data.vec, elem);
             }
@@ -143,7 +143,7 @@ impl<T, const N: usize> SmallVec<T, N> {
     pub fn clear(&mut self) {
         if (self.size as usize) <= N {
             if mem::needs_drop::<T>() {
-                // SAFETY: If `size` <= `N` we have a small representation.
+                // Safety: If `size` <= `N` we have a small representation.
                 // The first `size` elements are initialized.
                 unsafe {
                     for i in 0..self.size as usize {
@@ -153,7 +153,7 @@ impl<T, const N: usize> SmallVec<T, N> {
             }
             self.size = 0;
         } else {
-            // SAFETY: If `size` > `N` we have a large representation.
+            // Safety: If `size` > `N` we have a large representation.
             unsafe { (*self.data.vec).clear() }
         }
     }
@@ -161,11 +161,11 @@ impl<T, const N: usize> SmallVec<T, N> {
     /// Get a shared reference to the contained slice.
     pub fn as_slice(&self) -> &[T] {
         if (self.size as usize) <= N {
-            // SAFETY: If `size` <= `N` we have a small representation.
+            // Safety: If `size` <= `N` we have a small representation.
             // The first `size` elements are initialized.
             unsafe { mem::transmute(&(*self.data.arr)[..self.size as usize]) }
         } else {
-            // SAFETY: If `size` > `N` we have a large representation.
+            // Safety: If `size` > `N` we have a large representation.
             unsafe { &self.data.vec }
         }
     }
@@ -173,11 +173,11 @@ impl<T, const N: usize> SmallVec<T, N> {
     /// Get a mutable reference to the contained slice.
     pub fn as_slice_mut(&mut self) -> &mut [T] {
         if (self.size as usize) <= N {
-            // SAFETY: If `size` <= `N` we have a small representation.
+            // Safety: If `size` <= `N` we have a small representation.
             // The first `size` elements are initialized.
             unsafe { mem::transmute(&mut (*self.data.arr)[..self.size as usize]) }
         } else {
-            // SAFETY: If `size` > `N` we have a large representation.
+            // Safety: If `size` > `N` we have a large representation.
             unsafe { &mut self.data.vec }
         }
     }
@@ -188,23 +188,25 @@ impl<T, const N: usize> SmallVec<T, N> {
         F: Fn(&T) -> bool,
     {
         if (self.size as usize) <= N {
-            // SAFETY: If `size` <= `N` we have a small representation.
-            // The first `size` elements are initialized.
+            // Safety: If `size` <= `N` we have a small representation.
+            // The first `size` elements are initialized. We set size to zero at
+            // the start, so we will miss some drops if there is a panic.
             unsafe {
-                let mut j = 0;
-                for i in 0..self.size as usize {
+                let old_size = self.size as usize;
+                self.size = 0;
+                for i in 0..old_size {
                     if pred((*self.data.arr)[i].assume_init_ref()) {
+                        let j = self.size as usize;
                         if i != j {
                             let val = self.data.arr[i].assume_init_read();
                             (*self.data.arr)[j].write(val);
                         }
-                        j += 1;
+                        self.size += 1;
                     }
                 }
-                self.size = j as u8;
             }
         } else {
-            // SAFETY: If `size` > `N` we have a large representation.
+            // Safety: If `size` > `N` we have a large representation.
             unsafe { (*self.data.vec).retain(pred) }
         }
     }
@@ -215,23 +217,25 @@ impl<T, const N: usize> SmallVec<T, N> {
         F: Fn(&mut T) -> bool,
     {
         if (self.size as usize) <= N {
-            // SAFETY: If `size` <= `N` we have a small representation.
-            // The first `size` elements are initialized.
+            // Safety: If `size` <= `N` we have a small representation.
+            // The first `size` elements are initialized. We set size to zero at
+            // the start, so we will miss some drops if there is a panic.
             unsafe {
-                let mut j = 0;
-                for i in 0..self.size as usize {
+                let old_size = self.size as usize;
+                self.size = 0;
+                for i in 0..old_size {
                     if pred((*self.data.arr)[i].assume_init_mut()) {
+                        let j = self.size as usize;
                         if i != j {
                             let val = self.data.arr[i].assume_init_read();
                             (*self.data.arr)[j].write(val);
                         }
-                        j += 1;
+                        self.size += 1;
                     }
                 }
-                self.size = j as u8;
             }
         } else {
-            // SAFETY: If `size` > `N` we have a large representation.
+            // Safety: If `size` > `N` we have a large representation.
             unsafe { (*self.data.vec).retain_mut(pred) }
         }
     }
@@ -242,24 +246,29 @@ impl<T, const N: usize> SmallVec<T, N> {
         T: PartialEq,
     {
         if (self.size as usize) <= N {
-            // SAFETY: If `size` <= `N` we have a small representation.
-            // The first `size` elements are initialized.
+            // Safety: If `size` <= `N` we have a small representation.
+            // The first `size` elements are initialized. We set size to zero at
+            // the start, so we will miss some drops if there is a panic.
             unsafe {
-                let mut j = 1;
-                for i in 1..self.size as usize {
-                    if self.data.arr[i].assume_init_ref() != self.data.arr[j - 1].assume_init_ref()
-                    {
-                        if i != j {
-                            let val = self.data.arr[i].assume_init_read();
-                            (*self.data.arr)[j].write(val);
+                if self.size != 0 {
+                    let old_size = self.size as usize;
+                    self.size = 1;
+                    for i in 1..old_size {
+                        let j = self.size as usize;
+                        if self.data.arr[i].assume_init_ref()
+                            != self.data.arr[j - 1].assume_init_ref()
+                        {
+                            if i != j {
+                                let val = self.data.arr[i].assume_init_read();
+                                (*self.data.arr)[j].write(val);
+                            }
+                            self.size += 1;
                         }
-                        j += 1;
                     }
                 }
-                self.size = j as u8;
             }
         } else {
-            // SAFETY: If `size` > `N` we have a large representation.
+            // Safety: If `size` > `N` we have a large representation.
             unsafe { (*self.data.vec).dedup() }
         }
     }
@@ -269,7 +278,7 @@ impl<T, const N: usize> Drop for SmallVec<T, N> {
     fn drop(&mut self) {
         if (self.size as usize) <= N {
             if mem::needs_drop::<T>() {
-                // SAFETY: If `size` <= `N` we have a small representation.
+                // Safety: If `size` <= `N` we have a small representation.
                 // The first `size` elements are initialized.
                 unsafe {
                     for i in 0..self.size as usize {
@@ -278,7 +287,7 @@ impl<T, const N: usize> Drop for SmallVec<T, N> {
                 }
             }
         } else {
-            // SAFETY: If `size` > `N` we have a large representation.
+            // Safety: If `size` > `N` we have a large representation.
             unsafe { ManuallyDrop::drop(&mut self.data.vec) }
         }
     }
@@ -346,7 +355,7 @@ impl<T, const N: usize> Iterator for SmallVecIntoIter<T, N> {
         match self {
             SmallVecIntoIter::Small(arr, i, size) => {
                 if i < size {
-                    // SAFETY: The first `size` values are initialized.
+                    // Safety: The first `size` values are initialized.
                     let result = Some(unsafe { arr[*i as usize].assume_init_read() });
                     *i += 1;
                     result
@@ -365,7 +374,7 @@ impl<T, const N: usize> Drop for SmallVecIntoIter<T, N> {
             match self {
                 SmallVecIntoIter::Small(arr, i, size) => {
                     for j in *i as usize..*size as usize {
-                        // SAFETY: The first `size` values are initialized, and the
+                        // Safety: The first `size` values are initialized, and the
                         // values from `i` onward have not yet been given out.
                         unsafe { arr[j].assume_init_drop() };
                     }
@@ -384,14 +393,14 @@ impl<T, const N: usize> IntoIterator for SmallVec<T, N> {
     fn into_iter(self) -> Self::IntoIter {
         let mut me = ManuallyDrop::new(self);
         if (me.size as usize) <= N {
-            // SAFETY: If `size` <= `N` we have a small representation.
+            // Safety: If `size` <= `N` we have a small representation.
             // The first `size` elements are initialized.
             unsafe {
                 let arr = ptr::from_mut(&mut *me.data.arr);
                 SmallVecIntoIter::Small(arr.read(), 0, me.size)
             }
         } else {
-            // SAFETY: If `size` > `N` we have a large representation.
+            // Safety: If `size` > `N` we have a large representation.
             unsafe {
                 let vec = ptr::from_mut(&mut *me.data.vec);
                 SmallVecIntoIter::Large(vec.read().into_iter())

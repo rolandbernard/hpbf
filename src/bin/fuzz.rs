@@ -181,12 +181,8 @@ fn check_code<'code>(code: &'code str) -> bool {
     if inplace != baseint_no_opt {
         return false;
     }
-    let baseint = result_with::<u8, BaseInterpreter<u8>>(code, false, 1);
-    if inplace != baseint {
-        return false;
-    }
-    let baseint = result_with::<u8, BaseInterpreter<u8>>(code, false, 3);
-    if inplace != baseint {
+    let irint = result_with::<u8, BaseInterpreter<u8>>(code, false, 4);
+    if inplace != irint {
         return false;
     }
     return true;

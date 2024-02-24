@@ -35,7 +35,7 @@ pub struct Error<'str> {
 
 /// Only types implementing this trait are allowed for the cells. It is
 /// implemented in this library for [`u8`], [`u16`], [`u32`], and [`u64`].
-pub trait CellType: Copy + Ord + Hash + Debug {
+pub trait CellType: Copy + Ord + Hash + Debug + 'static {
     /// Number of bits of this type. Needed for code generation.
     const BITS: u32;
 

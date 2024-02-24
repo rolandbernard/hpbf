@@ -243,6 +243,21 @@ macro_rules! same_as_inplace_tests {
                 "[+]>+[<[>-<+]->>.<]",
                 non_changing_in_first_loop_but_not_const
             );
+            same_as_inplace_test!(
+                $i,
+                "+[<<>.->]",
+                no_effect_still_needs_clobbering
+            );
+            same_as_inplace_test!(
+                $i,
+                "+.->-[<+[,.]>-]",
+                non_clobbering_writes_are_still_needed
+            );
+            same_as_inplace_test!(
+                $i,
+                "+[.,>+[.>[.]]+[.[-<>.,]]]",
+                loop_analysis_after_inlining_shift
+            );
 
             // Manually created test cases.
             same_as_inplace_test_no_miri!(

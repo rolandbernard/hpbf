@@ -59,7 +59,7 @@ impl<C: CellType> Memory<C> {
     pub fn read(&self, offset: isize) -> C {
         let ptr = self.offset.wrapping_add_signed(offset);
         if ptr < self.size {
-            // SAFETY: The area from `memory` can safely be accessed up to `size`.
+            // Safety: The area from `memory` can safely be accessed up to `size`.
             unsafe { self.buffer.add(ptr).read() }
         } else {
             C::ZERO
@@ -94,10 +94,10 @@ impl<C: CellType> Memory<C> {
                 .min(new_size - self.size - needed_above),
         };
         let new_layout = Layout::array::<C>(new_size).unwrap();
-        // SAFETY: Layout is never zero-sized.
+        // Safety: Layout is never zero-sized.
         let new_buffer = unsafe { alloc_zeroed(new_layout) as *mut C };
         if self.size != 0 {
-            // SAFETY: If the old size is non-zero, the old region is valid.
+            // Safety: If the old size is non-zero, the old region is valid.
             unsafe {
                 self.buffer
                     .copy_to_nonoverlapping(new_buffer.wrapping_add(added_below), self.size);
@@ -114,7 +114,7 @@ impl<C: CellType> Memory<C> {
     fn write_out_of_bounds(&mut self, offset: isize, value: C) {
         self.make_accessible(offset, offset + 1);
         let ptr = self.offset.wrapping_add_signed(offset);
-        // SAFETY: `make_accessible` ensures that `ptr` can be written safely.
+        // Safety: `make_accessible` ensures that `ptr` can be written safely.
         unsafe { self.buffer.add(ptr).write(value) }
     }
 
@@ -123,7 +123,7 @@ impl<C: CellType> Memory<C> {
     pub fn write(&mut self, offset: isize, value: C) {
         let ptr = self.offset.wrapping_add_signed(offset);
         if ptr < self.size {
-            // SAFETY: The area from `memory` can safely be accessed up to `size`.
+            // Safety: The area from `memory` can safely be accessed up to `size`.
             unsafe { self.buffer.add(ptr).write(value) }
         } else {
             self.write_out_of_bounds(offset, value);
@@ -181,7 +181,7 @@ impl<'a, C: CellType> Context<'a, C> {
 impl<C: CellType> Drop for Memory<C> {
     fn drop(&mut self) {
         if self.size != 0 {
-            // SAFETY: If the old size is non-zero, the old region is valid.
+            // Safety: If the old size is non-zero, the old region is valid.
             unsafe {
                 let old_layout = Layout::array::<C>(self.size).unwrap();
                 dealloc(self.buffer as *mut u8, old_layout);

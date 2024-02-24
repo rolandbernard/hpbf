@@ -85,6 +85,28 @@ impl<C: CellType> Expr<C> {
         }
     }
 
+    /// Return the number of operations needed to compute this expressions.
+    /// This is only a loose worst case approximation.
+    pub fn op_count(&self) -> usize {
+        (self.parts.iter().map(|p| 2 * p.vars.len()).sum::<usize>()
+            + self
+                .parts
+                .iter()
+                .filter(|p| p.coef != C::ONE && p.coef != C::NEG_ONE)
+                .count())
+        .saturating_sub(1)
+    }
+
+    /// Return the number of additions needed to compute this expressions.
+    pub fn add_count(&self) -> usize {
+        self.parts.len().saturating_sub(1)
+    }
+
+    /// Return true if this expression is a constant zero.
+    pub fn is_zero(&self) -> bool {
+        self.parts.is_empty()
+    }
+
     /// Special detection of e.g. 128*x + 129*x*x which is equivalent to x*x.
     /// For now, only do this when it enables us to eliminate a multiplication
     /// or even a complete term.
@@ -299,23 +321,49 @@ impl<C: CellType> Expr<C> {
     /// assert_eq!(expr.inc_of(0), None);
     /// ```
     pub fn inc_of(&self, var: isize) -> Option<Self> {
+        if let Some((inc, mul)) = self.prod_inc_of(var) {
+            if mul == C::ONE {
+                Some(inc)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// If this expression is a simple sum of a multiple of the variable `var`
+    /// with some other expression, return that expression and the multiple.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hpbf::{Expr};
+    /// let expr = Expr::<u8>::var(0).add(Expr::<u8>::val(5));
+    /// assert_eq!(expr.prod_inc_of(0), Some((Expr::val(5), 1)));
+    /// assert_eq!(expr.prod_inc_of(1), None);
+    /// let expr = Expr::<u8>::var(0).mul(Expr::<u8>::val(5));
+    /// assert_eq!(expr.prod_inc_of(0), Some((Expr::val(0), 5)));
+    /// ```
+    pub fn prod_inc_of(&self, var: isize) -> Option<(Self, C)> {
         if self
             .parts
             .iter()
-            .any(|part| part.vars.len() == 1 && part.vars[0] == var && part.coef == C::ONE)
+            .any(|part| part.vars.len() == 1 && part.vars[0] == var)
             && self
                 .parts
                 .iter()
                 .all(|part| !part.vars.contains(&var) || part.vars.len() == 1)
         {
+            let mut mul = C::ZERO;
             let mut parts = SmallVec::with_capacity(self.parts.len() - 1);
-            parts.extend(
-                self.parts
-                    .iter()
-                    .filter(|part| part.vars.len() != 1 || part.vars[0] != var)
-                    .cloned(),
-            );
-            Some(Expr { parts })
+            for part in &self.parts {
+                if part.vars.len() != 1 || part.vars[0] != var {
+                    parts.push(part.clone());
+                } else {
+                    mul = part.coef;
+                }
+            }
+            Some((Expr { parts }, mul))
         } else {
             None
         }
@@ -433,29 +481,20 @@ impl<C: CellType> Expr<C> {
         }
     }
 
-    /// Combination of [`Self::prod_of`] and [`Self::constant`].
-    ///
-    /// # Examples
-    /// ```
-    /// # use hpbf::{Expr};
-    /// let expr = Expr::<u8>::val(5);
-    /// assert_eq!(expr.const_prod_of(0), None);
-    /// let expr = Expr::<u8>::var(0).mul(Expr::<u8>::val(5));
-    /// assert_eq!(expr.const_prod_of(0), Some(5));
-    /// let expr = Expr::<u8>::var(0).mul(Expr::<u8>::var(5));
-    /// assert_eq!(expr.const_prod_of(0), None);
-    /// ```
-    pub fn const_prod_of(&self, var: isize) -> Option<C> {
-        if self.parts.is_empty() {
-            Some(C::ZERO)
-        } else if self.parts.len() == 1
-            && self.parts[0].vars.len() == 1
-            && self.parts[0].vars[0] == var
-        {
-            Some(self.parts[0].coef)
+    /// Return the part of this expression that is the result of all variables
+    /// evaluating to zero. This is a more efficient implementation for this
+    /// specific case than using [`Self::evaluate`].
+    pub fn constant_part(&self) -> C {
+        if self.parts.is_empty() || !self.parts[0].vars.is_empty() {
+            C::ZERO
         } else {
-            None
+            self.parts[0].coef
         }
+    }
+
+    /// Return the variables but grouped by multiplication.
+    pub fn grouped_vars<'a>(&'a self) -> impl Iterator<Item = &'a SmallVec<isize, 1>> + 'a {
+        self.parts.iter().map(|part| &part.vars)
     }
 
     /// If this expression is the identity of a single variable, return the
