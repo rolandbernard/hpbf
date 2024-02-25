@@ -51,6 +51,95 @@ impl GenState {
             false
         }
     }
+
+    /// After introducing an `+` instruction.
+    fn add(&mut self) {
+        if let Some(v) = self.known_loads.get_mut(&self.shift) {
+            *v = v.wrapping_add(1);
+        } else if !self.written.contains(&self.shift) {
+            let v = self.known_adds.entry(self.shift).or_insert(0);
+            *v = v.wrapping_add(1);
+        }
+    }
+
+    /// After introducing an `-` instruction.
+    fn sub(&mut self) {
+        if let Some(v) = self.known_loads.get_mut(&self.shift) {
+            *v = v.wrapping_sub(1);
+        } else if !self.written.contains(&self.shift) {
+            let v = self.known_adds.entry(self.shift).or_insert(0);
+            *v = v.wrapping_sub(1);
+        }
+    }
+
+    /// After introducing an `<` instruction.
+    fn left(&mut self) {
+        self.shift -= 1;
+    }
+
+    /// After introducing an `>` instruction.
+    fn right(&mut self) {
+        self.shift += 1;
+    }
+
+    /// After introducing an `,` instruction.
+    fn input(&mut self) {
+        self.written.insert(self.shift);
+        self.known_adds.remove(&self.shift);
+        self.known_loads.remove(&self.shift);
+    }
+
+    /// After introducing an `.` instruction.
+    fn output(&mut self) {
+        self.has_out = true;
+    }
+
+    /// After introducing an `[` instruction.
+    fn push(&mut self) -> Self {
+        let initial_cond = self.known_loads.get(&self.shift).copied();
+        GenState::new(initial_cond)
+    }
+
+    /// After introducing an `]` instruction.
+    fn pop(&mut self, prev_state: Self) -> bool {
+        let mut needs_out = false;
+        if prev_state.initial_cond != Some(0) {
+            if !prev_state.finite() && !prev_state.has_out {
+                needs_out = true
+            }
+            if prev_state.sub_shift || prev_state.shift != 0 {
+                self.sub_shift = true;
+                self.written.clear();
+                self.known_adds.clear();
+                self.known_loads.clear();
+            } else {
+                for &var in prev_state
+                    .known_adds
+                    .keys()
+                    .chain(prev_state.known_loads.keys())
+                    .chain(prev_state.written.iter())
+                {
+                    let var = self.shift + var;
+                    self.written.insert(var);
+                    self.known_adds.remove(&var);
+                    self.known_loads.remove(&var);
+                }
+            }
+            if prev_state.initial_cond.is_some() {
+                if prev_state.has_out {
+                    self.has_out = true;
+                }
+                for (&var, &val) in &prev_state.known_loads {
+                    self.known_loads
+                        .insert(self.shift + var - prev_state.shift, val);
+                }
+            }
+        }
+        self.written.remove(&self.shift);
+        self.known_adds.remove(&self.shift);
+        self.known_loads.insert(self.shift, 0);
+        needs_out
+    }
 }
 
 /// Generate a random Brainfuck program. The program is guaranteed to be syntactically
@@ -64,84 +153,42 @@ fn generate_code(hasher: &mut impl Hasher, max_len: usize) -> String {
         match hasher.finish() % 8 {
             0 => {
                 str.push('+');
-                if let Some(v) = state.known_loads.get_mut(&state.shift) {
-                    *v = v.wrapping_add(1);
-                } else if !state.written.contains(&state.shift) {
-                    let v = state.known_adds.entry(state.shift).or_insert(0);
-                    *v = v.wrapping_add(1);
-                }
+                state.add();
             }
             1 => {
                 str.push('-');
-                if let Some(v) = state.known_loads.get_mut(&state.shift) {
-                    *v = v.wrapping_sub(1);
-                } else if !state.written.contains(&state.shift) {
-                    let v = state.known_adds.entry(state.shift).or_insert(0);
-                    *v = v.wrapping_sub(1);
-                }
+                state.sub();
             }
             2 => {
                 str.push('<');
-                state.shift -= 1;
+                state.left();
             }
             3 => {
                 str.push('>');
-                state.shift += 1;
+                state.right();
             }
             4 => {
                 str.push(',');
-                state.written.insert(state.shift);
-                state.known_adds.remove(&state.shift);
-                state.known_loads.remove(&state.shift);
+                state.input();
             }
             5 => {
                 str.push('.');
-                state.has_out = true;
+                state.output();
             }
             6 => {
                 if stack.len() > 1 {
                     let prev_state = stack.pop().unwrap();
-                    if !prev_state.finite() && !prev_state.has_out {
+                    let state = stack.last_mut().unwrap();
+                    if state.pop(prev_state) {
                         str.push('.');
                     }
                     str.push(']');
-                    let state = stack.last_mut().unwrap();
-                    if prev_state.initial_cond != Some(0) {
-                        if prev_state.sub_shift || prev_state.shift != 0 {
-                            state.sub_shift = true;
-                            state.written.clear();
-                            state.known_adds.clear();
-                            state.known_loads.clear();
-                        } else {
-                            for &var in prev_state
-                                .known_adds
-                                .keys()
-                                .chain(prev_state.known_loads.keys())
-                                .chain(prev_state.written.iter())
-                            {
-                                let var = state.shift + var;
-                                state.written.insert(var);
-                                state.known_adds.remove(&var);
-                                state.known_loads.remove(&var);
-                            }
-                        }
-                        if prev_state.initial_cond.is_some() {
-                            if prev_state.has_out {
-                                state.has_out = true;
-                            }
-                            for (&var, &val) in &prev_state.known_loads {
-                                state
-                                    .known_loads
-                                    .insert(state.shift + var - prev_state.shift, val);
-                            }
-                        }
-                    }
                 }
             }
             _ => {
                 str.push('[');
-                let initial_cond = state.known_loads.get(&state.shift).copied();
-                stack.push(GenState::new(initial_cond));
+                let new = state.push();
+                stack.push(new);
             }
         }
     }
@@ -195,78 +242,24 @@ fn is_safe(code: &str) -> bool {
     for inst in code.chars() {
         let state = stack.last_mut().unwrap();
         match inst {
-            '+' => {
-                if let Some(v) = state.known_loads.get_mut(&state.shift) {
-                    *v = v.wrapping_add(1);
-                } else if !state.written.contains(&state.shift) {
-                    let v = state.known_adds.entry(state.shift).or_insert(0);
-                    *v = v.wrapping_add(1);
-                }
-            }
-            '-' => {
-                if let Some(v) = state.known_loads.get_mut(&state.shift) {
-                    *v = v.wrapping_sub(1);
-                } else if !state.written.contains(&state.shift) {
-                    let v = state.known_adds.entry(state.shift).or_insert(0);
-                    *v = v.wrapping_sub(1);
-                }
-            }
-            '<' => {
-                state.shift -= 1;
-            }
-            '>' => {
-                state.shift += 1;
-            }
-            ',' => {
-                state.written.insert(state.shift);
-                state.known_adds.remove(&state.shift);
-                state.known_loads.remove(&state.shift);
-            }
-            '.' => {
-                state.has_out = true;
-            }
+            '+' => state.add(),
+            '-' => state.sub(),
+            '<' => state.left(),
+            '>' => state.right(),
+            ',' => state.input(),
+            '.' => state.output(),
             ']' => {
                 if stack.len() > 1 {
                     let prev_state = stack.pop().unwrap();
-                    if !prev_state.finite() && !prev_state.has_out {
-                        return false;
-                    }
                     let state = stack.last_mut().unwrap();
-                    if prev_state.initial_cond != Some(0) {
-                        if prev_state.sub_shift || prev_state.shift != 0 {
-                            state.sub_shift = true;
-                            state.written.clear();
-                            state.known_adds.clear();
-                            state.known_loads.clear();
-                        } else {
-                            for &var in prev_state
-                                .known_adds
-                                .keys()
-                                .chain(prev_state.known_loads.keys())
-                                .chain(prev_state.written.iter())
-                            {
-                                let var = state.shift + var;
-                                state.written.insert(var);
-                                state.known_adds.remove(&var);
-                                state.known_loads.remove(&var);
-                            }
-                        }
-                        if prev_state.initial_cond.is_some() {
-                            if prev_state.has_out {
-                                state.has_out = true;
-                            }
-                            for (&var, &val) in &prev_state.known_loads {
-                                state
-                                    .known_loads
-                                    .insert(state.shift + var - prev_state.shift, val);
-                            }
-                        }
+                    if state.pop(prev_state) {
+                        return false;
                     }
                 }
             }
             '[' => {
-                let initial_cond = state.known_loads.get(&state.shift).copied();
-                stack.push(GenState::new(initial_cond));
+                let new = state.push();
+                stack.push(new);
             }
             _ => { /* comment */ }
         }
@@ -283,29 +276,42 @@ fn minimize_code(hasher: &mut impl Hasher, code: String) -> String {
         .skip(hasher.finish() as usize % code.len())
         .take(code.len())
     {
-        if code_bytes[i] != b']' {
-            let next;
-            if code_bytes[i] == b'[' {
-                let mut end = i + 1;
-                let mut cnt = 0;
-                loop {
-                    if code_bytes[end] == b']' {
-                        if cnt == 0 {
-                            break;
-                        }
-                        cnt -= 1;
-                    } else if code_bytes[end] == b'[' {
-                        cnt += 1;
+        let next;
+        if code_bytes[i] == b']' {
+            let mut start = i - 1;
+            let mut cnt = 0;
+            loop {
+                if code_bytes[start] == b'[' {
+                    if cnt == 0 {
+                        break;
                     }
-                    end += 1;
+                    cnt -= 1;
+                } else if code_bytes[start] == b']' {
+                    cnt += 1;
                 }
-                next = code[..i].to_owned() + &code[end + 1..];
-            } else {
-                next = code[..i].to_owned() + &code[i + 1..];
+                start -= 1;
             }
-            if is_safe(&next) && !check_code(&next) {
-                return minimize_code(hasher, next);
+            next = code[..start].to_owned() + &code[start + 1..i] + &code[i + 1..];
+        } else if code_bytes[i] == b'[' {
+            let mut end = i + 1;
+            let mut cnt = 0;
+            loop {
+                if code_bytes[end] == b']' {
+                    if cnt == 0 {
+                        break;
+                    }
+                    cnt -= 1;
+                } else if code_bytes[end] == b'[' {
+                    cnt += 1;
+                }
+                end += 1;
             }
+            next = code[..i].to_owned() + &code[end + 1..];
+        } else {
+            next = code[..i].to_owned() + &code[i + 1..];
+        }
+        if is_safe(&next) && !check_code(&next) {
+            return minimize_code(hasher, next);
         }
     }
     return code;
