@@ -202,11 +202,7 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
     /// Insert a new known cell operation.
     fn insert_written(&mut self, var: isize, val: OptWrite<C>) {
         if let OptWrite::Known(expr) = val {
-            if !self.compare_parent(Expr::var(var), &expr) {
-                self.written.insert(var, OptWrite::Known(expr.normalize()));
-            } else {
-                self.written.remove(&var);
-            }
+            self.written.insert(var, OptWrite::Known(expr.normalize()));
         } else {
             self.written.insert(var, val);
         }
@@ -365,31 +361,25 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
     fn gather_to_emit_dfs(
         &mut self,
         var: isize,
-        run: usize,
         depth: usize,
-        visited: &mut HashMap<isize, (usize, usize)>,
-        stack: &mut Vec<isize>,
-        comps: &mut Vec<SmallVec<isize, 1>>,
+        visited: &mut HashMap<isize, usize>,
+        stack: &mut Vec<(isize, Expr<C>)>,
+        comps: &mut Vec<SmallVec<(isize, Expr<C>), 1>>,
     ) -> usize {
-        visited.insert(var, (run, depth));
+        visited.insert(var, depth);
         let stack_len = stack.len();
         let mut low = depth;
-        if let Some(next) = self.reverse.get(&var) {
-            let mut next = next.iter().copied().collect::<Vec<_>>();
-            next.sort();
-            for n in next {
-                if let Some((r, v)) = visited.get(&n) {
-                    if *r == run {
-                        low = low.min(*v);
-                    }
-                } else {
-                    let reached = self.gather_to_emit_dfs(n, run, depth + 1, visited, stack, comps);
-                    low = low.min(reached);
-                }
+        while let Some(&n) = self.reverse.get(&var).and_then(|next| next.iter().next()) {
+            if let Some(v) = visited.get(&n) {
+                low = low.min(*v);
+                self.reverse.get_mut(&var).unwrap().remove(&n);
+            } else {
+                let reached = self.gather_to_emit_dfs(n, depth + 1, visited, stack, comps);
+                low = low.min(reached);
             }
         }
-        if self.pending.contains_key(&var) {
-            stack.push(var);
+        if let Some(pending) = self.remove_pending(var) {
+            stack.push((var, pending));
         }
         if low == depth && stack.len() != stack_len {
             let mut new_comp = SmallVec::with_capacity(stack.len() - stack_len);
@@ -405,21 +395,21 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
     /// other pending operations. This function performs the necessary steps and
     /// returns the operations that must be performed grouped by, and in the order
     /// in which they must be emitted.
-    fn gather_for_emit(&mut self, emit: &[isize]) -> Vec<SmallVec<isize, 1>> {
+    fn gather_for_emit(&mut self, emit: &[isize]) -> Vec<SmallVec<(isize, Expr<C>), 1>> {
         let mut comps = Vec::new();
         if emit.iter().all(|var| !self.reverse.contains_key(var)) {
             // Optimize the common case where no one depends on anyone else.
             for &var in emit {
-                if self.pending.contains_key(&var) {
-                    comps.push(SmallVec::with(var));
+                if let Some(pending) = self.remove_pending(var) {
+                    comps.push(SmallVec::with((var, pending)));
                 }
             }
         } else {
             let mut visited = HashMap::with_capacity(2 * emit.len());
             let mut stack = Vec::with_capacity(4);
-            for (run, &var) in emit.iter().enumerate() {
+            for &var in emit {
                 if !visited.contains_key(&var) {
-                    self.gather_to_emit_dfs(var, run, 0, &mut visited, &mut stack, &mut comps);
+                    self.gather_to_emit_dfs(var, 0, &mut visited, &mut stack, &mut comps);
                 }
             }
         }
@@ -427,22 +417,21 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
     }
 
     /// Record the execution of the given operations.
-    fn written_calcs(&mut self, calcs: impl Iterator<Item = (isize, OptWrite<C>)>) {
+    fn written_calcs(
+        &mut self,
+        calcs: impl Iterator<Item = (isize, impl Into<Expr<C>> + AsRef<Expr<C>>)>,
+    ) {
         let mut knowns = SmallVec::<_, 1>::with_capacity(calcs.size_hint().0);
         for (var, calc) in calcs {
-            if let OptWrite::Known(calc) = calc {
-                // Special check to avoid overly large expressions.
-                if calc.op_count() < 32 {
-                    if let Some(calc) = self.eval_written(calc) {
-                        knowns.push((var, OptWrite::Known(calc)));
-                    } else {
-                        knowns.push((var, OptWrite::Unknown));
-                    }
+            // Special check to avoid overly large expressions.
+            if calc.as_ref().op_count() < 32 {
+                if let Some(calc) = self.eval_written(calc) {
+                    knowns.push((var, OptWrite::Known(calc)));
                 } else {
                     knowns.push((var, OptWrite::Unknown));
                 }
             } else {
-                knowns.push((var, calc));
+                knowns.push((var, OptWrite::Unknown));
             }
         }
         for (var, known) in knowns {
@@ -451,18 +440,14 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
     }
 
     /// Emit pending operations in the order and grouping specified in `to_emit`.
-    fn emit_structured(&mut self, to_emit: Vec<SmallVec<isize, 1>>) {
-        for vars in to_emit {
-            let mut calcs = SmallVec::with_capacity(vars.len());
-            for var in vars {
-                if let Some(calc) = self.remove_pending(var) {
-                    for referenced in calc.variables() {
-                        self.read(referenced);
-                    }
-                    calcs.push((var, calc));
+    fn emit_structured(&mut self, to_emit: Vec<SmallVec<(isize, Expr<C>), 1>>) {
+        for calcs in to_emit {
+            for (_, expr) in &calcs {
+                for referenced in expr.variables() {
+                    self.read(referenced);
                 }
             }
-            self.written_calcs(calcs.iter().map(|(i, v)| (*i, OptWrite::Known(v.clone()))));
+            self.written_calcs(calcs.iter().map(|(i, v)| (*i, v)));
             self.insts.push(Instr::Calc { calcs });
         }
     }
@@ -839,7 +824,13 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
             self.clobber(var, maybe);
         }
         self.insts.append(&mut sub_state.insts);
-        self.written_calcs(sub_state.written.into_iter());
+        self.written_calcs(sub_state.written.into_iter().filter_map(|(v, w)| {
+            if let OptWrite::Known(w) = w {
+                Some((v, w))
+            } else {
+                None
+            }
+        }));
         if sub_state.no_return {
             self.no_return = true;
         } else {
