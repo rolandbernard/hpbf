@@ -58,8 +58,19 @@ struct OptLoop<C: CellType> {
 struct OptAnalysis<C: CellType> {
     loop_anal: OptLoop<C>,
     has_shift: bool,
+    reads: HashSet<isize>,
     clobbered: HashSet<isize>,
     sub_blocks: Vec<OptAnalysis<C>>,
+}
+
+/// Type for holding the state during dead store elimination.
+struct OptDseState<'a, C: CellType> {
+    parent: Option<&'a OptDseState<'a, C>>,
+    shift: isize,
+    had_shift: bool,
+    anal: &'a OptAnalysis<C>,
+    reads: HashSet<isize>,
+    written: HashSet<isize>,
 }
 
 impl<'a, C: CellType> OptLoop<C> {
@@ -912,6 +923,7 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
         self.sub_anal.push(OptAnalysis {
             loop_anal,
             has_shift,
+            reads: sub_state.reads,
             clobbered,
             sub_blocks: sub_state.sub_anal,
         });
@@ -1215,26 +1227,127 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
     }
 }
 
+impl<'a, C: CellType> OptDseState<'a, C> {
+    /// Create a new state for performing dead store elimination.
+    fn new(shift: isize, parent: Option<&'a OptDseState<'a, C>>, anal: &'a OptAnalysis<C>) -> Self {
+        OptDseState {
+            parent,
+            shift,
+            had_shift: false,
+            anal,
+            reads: HashSet::new(),
+            written: HashSet::new(),
+        }
+    }
+
+    /// Register that a read has been encountered during the reverse scan.
+    fn read(&mut self, var: isize) {
+        self.written.remove(&var);
+        self.reads.insert(var);
+    }
+
+    /// Register that a write has been encountered during the reverse scan.
+    fn write(&mut self, var: isize) {
+        self.reads.remove(&var);
+        self.written.insert(var);
+    }
+
+    /// Return true only if the value of `var` is guaranteed to be written before
+    /// the next possible read.
+    fn will_be_overwritten(&self, var: isize) -> bool {
+        if self.written.contains(&var) {
+            true
+        } else if self.reads.contains(&var) || self.had_shift {
+            false
+        } else if let Some(parent) = self.parent {
+            if self.anal.loop_anal.at_most_once
+                || (!self.anal.has_shift && !self.anal.reads.contains(&var))
+            {
+                parent.will_be_overwritten(var - self.shift)
+            } else {
+                false
+            }
+        } else {
+            // NB: We assume that nothing runs after the end of the program.
+            true
+        }
+    }
+
+    /// Eliminate dead stores in the given block.
+    fn eliminate_in_block(&mut self, block: &mut Block<C>) {
+        let mut block_idx = self.anal.sub_blocks.len();
+        for instr in block.insts.iter_mut().rev() {
+            match instr {
+                Instr::Output { src } => self.read(*src),
+                Instr::Input { dst } => self.write(*dst),
+                Instr::Calc { calcs } => {
+                    let mut to_remove = HashSet::new();
+                    for (var, _) in calcs.iter() {
+                        if self.will_be_overwritten(*var) {
+                            to_remove.insert(*var);
+                        } else {
+                            self.write(*var);
+                        }
+                    }
+                    calcs.retain(|(x, _)| !to_remove.contains(x));
+                    for (_, calc) in calcs {
+                        for var in calc.variables() {
+                            self.read(var);
+                        }
+                    }
+                }
+                Instr::Loop { cond, block } | Instr::If { cond, block } => {
+                    block_idx -= 1;
+                    self.read(*cond);
+                    let sub_anal = &self.anal.sub_blocks[block_idx];
+                    let mut sub_state = OptDseState::new(block.shift, Some(self), sub_anal);
+                    sub_state.eliminate_in_block(block);
+                    let OptDseState { reads, written, .. } = sub_state;
+                    if sub_anal.has_shift {
+                        self.had_shift = true;
+                        self.written.clear();
+                        self.reads.clear();
+                    }
+                    if sub_anal.loop_anal.at_least_once {
+                        for var in written {
+                            self.write(var);
+                        }
+                    }
+                    for var in reads {
+                        self.read(var);
+                    }
+                    self.read(*cond);
+                }
+            }
+        }
+    }
+}
+
 impl<C: CellType> Program<C> {
     /// Perform one iteration of optimization and return the new program.
     fn optimize_once(&self, prev_anal: OptAnalysis<C>) -> (Self, OptAnalysis<C>) {
         let mut state = OptRebuild::new(0, None, OptParent::Zero, Some(prev_anal));
         state.rebuild_block(self);
-        for var in state.pending(&state) {
-            state.emit(var);
-        }
+        // NB: We assume that nothing runs after the end of the program.
         (
             Program {
-                shift: state.shift,
+                shift: 0,
                 insts: state.insts,
             },
             OptAnalysis {
                 loop_anal: OptLoop::at_most_once(true),
                 has_shift: false,
+                reads: state.reads,
                 clobbered: HashSet::new(),
                 sub_blocks: state.sub_anal,
             },
         )
+    }
+
+    /// Remove computations that will be overwritten in any case.
+    fn dead_store_elimination(&mut self, anal: &OptAnalysis<C>) {
+        let mut state = OptDseState::new(0, None, anal);
+        state.eliminate_in_block(self);
     }
 
     /// Optimize the program, and return the optimized copy of the program.
@@ -1243,12 +1356,14 @@ impl<C: CellType> Program<C> {
             let mut anal = OptAnalysis {
                 loop_anal: OptLoop::at_most_once(true),
                 has_shift: false,
+                reads: HashSet::new(),
                 clobbered: HashSet::new(),
                 sub_blocks: Vec::new(),
             };
             let mut prog;
             (prog, anal) = self.optimize_once(anal);
             for _ in 1..level {
+                prog.dead_store_elimination(&anal);
                 (prog, anal) = prog.optimize_once(anal);
             }
             return prog;
