@@ -1,6 +1,6 @@
 //! Benchmark the optimizer.
 
-use hpbf::{CellType, Program};
+use hpbf::{ir::Program, CellType};
 use iai_callgrind::{library_benchmark, library_benchmark_group, main};
 use std::{fs, hint::black_box};
 

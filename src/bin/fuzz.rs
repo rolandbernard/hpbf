@@ -1,3 +1,6 @@
+//! Small application that performs fuzzing on the optimizer by comparing it to
+//! the inplace interpreter.
+
 use std::{
     collections::{hash_map::RandomState, HashMap, HashSet},
     env, fs,
@@ -6,7 +9,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use hpbf::{BaseInterpreter, CellType, Context, Executor, InplaceInterpreter};
+use hpbf::{
+    exec::{BaseInterpreter, Executor, InplaceInterpreter},
+    runtime::Context,
+    CellType,
+};
 
 /// State used to track variable information during the code generation for the
 /// fuzzing. This is required to ensure that every loop is either finite or performs
@@ -203,18 +210,14 @@ fn generate_code(hasher: &mut impl Hasher, max_len: usize) -> String {
 
 /// Execute the code and terminate after either reading or writing a certain
 /// finite number of bytes. Returns the output bytes as a [`Vec<u8>`].
-fn result_with<'code, C: CellType, E: Executor<'code, C>>(
-    code: &'code str,
-    no_opt: bool,
-    opt: u32,
-) -> Vec<u8> {
+fn result_with<'code, C: CellType, E: Executor<'code, C>>(code: &'code str, opt: u32) -> Vec<u8> {
     let mut input = Vec::new();
     for i in 0..1024 {
         input.push((183 * i) as u8);
     }
     let mut output = input.clone();
     let mut context = Context::new(Some(Box::new(&input[..])), Some(Box::new(&mut output[..])));
-    let exec = E::create(code, no_opt, opt).unwrap();
+    let exec = E::create(code, opt).unwrap();
     exec.execute(&mut context).unwrap();
     drop(context);
     return output;
@@ -223,12 +226,12 @@ fn result_with<'code, C: CellType, E: Executor<'code, C>>(
 /// Check the code by executing it with different executors. Tests that the output
 /// of all the executors is identical.
 fn check_code<'code>(code: &'code str) -> bool {
-    let inplace = result_with::<u8, InplaceInterpreter<'code, u8>>(code, false, 0);
-    let baseint_no_opt = result_with::<u8, BaseInterpreter<u8>>(code, true, 0);
+    let inplace = result_with::<u8, InplaceInterpreter<'code, u8>>(code, 0);
+    let baseint_no_opt = result_with::<u8, BaseInterpreter<u8>>(code, 0);
     if inplace != baseint_no_opt {
         return false;
     }
-    let irint = result_with::<u8, BaseInterpreter<u8>>(code, false, 4);
+    let irint = result_with::<u8, BaseInterpreter<u8>>(code, 4);
     if inplace != irint {
         return false;
     }

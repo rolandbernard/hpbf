@@ -192,7 +192,7 @@ impl<C: CellType> Drop for Memory<C> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{runtime::Memory, Context};
+    use crate::{runtime::Context, runtime::Memory};
 
     #[test]
     fn reading_unused_cells_return_zero() {

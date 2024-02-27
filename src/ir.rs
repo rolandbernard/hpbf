@@ -11,7 +11,7 @@ use crate::{
 /// Parts of expression. Represents the product of the coefficient and the set
 /// of variables.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct ExprPart<C: CellType> {
+struct ExprPart<C: CellType> {
     coef: C,
     vars: SmallVec<isize, 1>,
 }
@@ -56,6 +56,28 @@ pub enum Instr<C: CellType> {
         cond: isize,
         block: Block<C>,
     },
+}
+
+/// Type for abstracting over the different code generation backends.
+pub trait CodeGen<C: CellType> {
+    /// This is the input and output type of the operations.
+    type Output;
+    type Error;
+
+    /// Generate code for loading an immediate value.
+    fn imm(&mut self, imm: C) -> Result<Self::Output, Self::Error>;
+
+    /// Generate code for loading from a memory location.
+    fn mem(&mut self, var: isize) -> Result<Self::Output, Self::Error>;
+
+    /// Generate code for loading from a adding two values.
+    fn add(&mut self, a: Self::Output, b: Self::Output) -> Result<Self::Output, Self::Error>;
+
+    /// Generate code for loading from a subtracting two values.
+    fn sub(&mut self, a: Self::Output, b: Self::Output) -> Result<Self::Output, Self::Error>;
+
+    /// Generate code for loading from a multiplying two values.
+    fn mul(&mut self, a: Self::Output, b: Self::Output) -> Result<Self::Output, Self::Error>;
 }
 
 impl<C: CellType> Expr<C> {
@@ -321,12 +343,22 @@ impl<C: CellType> Expr<C> {
     /// assert_eq!(expr.inc_of(0), None);
     /// ```
     pub fn inc_of(&self, var: isize) -> Option<Self> {
-        if let Some((inc, mul)) = self.prod_inc_of(var) {
-            if mul == C::ONE {
-                Some(inc)
-            } else {
-                None
+        if self
+            .parts
+            .iter()
+            .any(|part| part.coef == C::ONE && part.vars.len() == 1 && part.vars[0] == var)
+            && self
+                .parts
+                .iter()
+                .all(|part| !part.vars.contains(&var) || part.vars.len() == 1)
+        {
+            let mut parts = SmallVec::with_capacity(self.parts.len() - 1);
+            for part in &self.parts {
+                if part.vars.len() != 1 || part.vars[0] != var {
+                    parts.push(part.clone());
+                }
             }
+            Some(Expr { parts })
         } else {
             None
         }
@@ -340,7 +372,7 @@ impl<C: CellType> Expr<C> {
     /// # use hpbf::{Expr};
     /// let expr = Expr::<u8>::var(0).add(Expr::<u8>::val(5));
     /// assert_eq!(expr.prod_inc_of(0), Some((Expr::val(5), 1)));
-    /// assert_eq!(expr.prod_inc_of(1), None);
+    /// assert_eq!(expr.prod_inc_of(1), Some((expr, 0)));
     /// let expr = Expr::<u8>::var(0).mul(Expr::<u8>::val(5));
     /// assert_eq!(expr.prod_inc_of(0), Some((Expr::val(0), 5)));
     /// ```
@@ -348,14 +380,10 @@ impl<C: CellType> Expr<C> {
         if self
             .parts
             .iter()
-            .any(|part| part.vars.len() == 1 && part.vars[0] == var)
-            && self
-                .parts
-                .iter()
-                .all(|part| !part.vars.contains(&var) || part.vars.len() == 1)
+            .all(|part| !part.vars.contains(&var) || part.vars.len() == 1)
         {
             let mut mul = C::ZERO;
-            let mut parts = SmallVec::with_capacity(self.parts.len() - 1);
+            let mut parts = SmallVec::with_capacity(self.parts.len());
             for part in &self.parts {
                 if part.vars.len() != 1 || part.vars[0] != var {
                     parts.push(part.clone());
@@ -617,6 +645,67 @@ impl<C: CellType> Expr<C> {
         }
     }
 
+    /// Perform the given operations on the codegen object to evaluate the expression.
+    /// Try to perform operations that use variables for which `ordering` returns
+    /// a low value first and others later.
+    pub fn codegen<G: CodeGen<C>>(
+        &self,
+        codegen: &mut G,
+        ordering: impl Fn(isize) -> usize,
+    ) -> Result<G::Output, G::Error> {
+        fn codegen_part<C: CellType, G: CodeGen<C>>(
+            part: &ExprPart<C>,
+            codegen: &mut G,
+            ordering: &impl Fn(isize) -> usize,
+        ) -> Result<G::Output, G::Error> {
+            if part.vars.is_empty() {
+                codegen.imm(part.coef)
+            } else {
+                let mut sorted = part.vars.clone();
+                sorted.sort_by_key(|&x| ordering(x));
+                let mut result = codegen.mem(sorted[0])?;
+                for var in sorted.into_iter().skip(1) {
+                    let mem = codegen.mem(var)?;
+                    result = codegen.mul(result, mem)?;
+                }
+                if part.coef == C::ONE || part.coef == C::NEG_ONE {
+                    Ok(result)
+                } else {
+                    let imm = codegen.imm(part.coef)?;
+                    codegen.mul(result, imm)
+                }
+            }
+        }
+        if self.parts.is_empty() {
+            codegen.imm(C::ZERO)
+        } else {
+            let mut sorted = self.parts.iter().collect::<Vec<_>>();
+            sorted.sort_by_key(|part| part.vars.iter().map(|&v| ordering(v)).min().unwrap_or(0));
+            if !sorted[0].vars.is_empty() && sorted[0].coef == C::NEG_ONE {
+                if let Some(idx) = sorted
+                    .iter()
+                    .position(|p| p.vars.is_empty() || p.coef != C::NEG_ONE)
+                {
+                    sorted.swap(0, idx);
+                }
+            }
+            let mut result = codegen_part(sorted[0], codegen, &ordering)?;
+            if sorted[0].coef == C::NEG_ONE {
+                let zero = codegen.imm(C::ZERO)?;
+                result = codegen.sub(zero, result)?;
+            }
+            for part in sorted.into_iter().skip(1) {
+                let part_res = codegen_part(part, codegen, &ordering)?;
+                if part.coef == C::NEG_ONE {
+                    result = codegen.sub(result, part_res)?;
+                } else {
+                    result = codegen.add(result, part_res)?;
+                }
+            }
+            Ok(result)
+        }
+    }
+
     /// Return an iterator over all the variables used in this expression.
     pub fn variables<'a>(&'a self) -> impl Iterator<Item = isize> + 'a {
         self.parts.iter().flat_map(|part| part.vars.iter()).copied()
@@ -865,8 +954,8 @@ impl<C: CellType> Debug for Expr<C> {
 }
 
 impl<C: CellType> Block<C> {
-    /// Pretty print the block with the given `block_id` and indented by `indent`
-    /// spaces into the formatter `f`. Referenced blocks are printed recursively.
+    /// Pretty print the block indented by `indent` spaces into the formatter `f`.
+    /// Referenced blocks are printed recursively.
     fn print_block(&self, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt::Result {
         for instr in &self.insts {
             match instr {
@@ -946,7 +1035,10 @@ impl<C: CellType> Into<Expr<C>> for &Expr<C> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Block, Error, ErrorKind, Instr, Program};
+    use crate::{
+        ir::{Block, Instr, Program},
+        Error, ErrorKind,
+    };
     use Instr::*;
 
     #[test]

@@ -5,8 +5,9 @@ use std::mem;
 
 use crate::{
     hasher::{HashMap, HashSet},
+    ir::{Block, Expr, Instr, Program},
     smallvec::SmallVec,
-    Block, CellType, Expr, Instr, Program,
+    CellType,
 };
 
 /// A write can either be known, unknown. A write that is not guaranteed to happen
@@ -380,13 +381,14 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
         visited.insert(var, depth);
         let stack_len = stack.len();
         let mut low = depth;
-        while let Some(&n) = self.reverse.get(&var).and_then(|next| next.iter().next()) {
-            if let Some(v) = visited.get(&n) {
-                low = low.min(*v);
-                self.reverse.get_mut(&var).unwrap().remove(&n);
-            } else {
-                let reached = self.gather_to_emit_dfs(n, depth + 1, visited, stack, comps);
-                low = low.min(reached);
+        if let Some(next) = self.reverse.get(&var) {
+            for n in next.iter().copied().collect::<Vec<_>>() {
+                if let Some(v) = visited.get(&n) {
+                    low = low.min(*v);
+                } else {
+                    let reached = self.gather_to_emit_dfs(n, depth + 1, visited, stack, comps);
+                    low = low.min(reached);
+                }
             }
         }
         if let Some(pending) = self.remove_pending(var) {

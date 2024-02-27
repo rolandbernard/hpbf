@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-use crate::{CellType, Context, Error, ErrorKind};
+use crate::{runtime::Context, CellType, Error, ErrorKind};
 
 use super::Executor;
 
@@ -26,7 +26,7 @@ pub struct InplaceInterpreter<'code, C: CellType> {
 }
 
 impl<'code, C: CellType> Executor<'code, C> for InplaceInterpreter<'code, C> {
-    fn create(code: &'code str, _no_opt: bool, _opt: u32) -> Result<Self, Error> {
+    fn create(code: &'code str, _opt: u32) -> Result<Self, Error> {
         Ok(InplaceInterpreter {
             code,
             _phantom: PhantomData,

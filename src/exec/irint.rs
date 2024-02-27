@@ -1,6 +1,10 @@
 //! A basic interpreter on the internal IR.
 
-use crate::{Block, CellType, Context, Error, Instr, Program};
+use crate::{
+    ir::{Block, Instr, Program},
+    runtime::Context,
+    CellType, Error,
+};
 
 use super::Executor;
 
@@ -24,12 +28,6 @@ pub struct BaseInterpreter<C: CellType> {
 }
 
 impl<C: CellType> BaseInterpreter<C> {
-    /// Print the IR representation internal to the interpreter. This prints the
-    /// IR after the optimization performed during interpreter creation.
-    pub fn print_ir(&self) {
-        println!("{:#?}", self.program);
-    }
-
     /// Execute a single block within the given program. The block does not necessary
     /// have to be part of the program, but all loops and ifs must refer to blocks
     /// within the program.
@@ -77,11 +75,9 @@ impl<C: CellType> BaseInterpreter<C> {
 }
 
 impl<'p, C: CellType> Executor<'p, C> for BaseInterpreter<C> {
-    fn create(code: &str, no_opt: bool, opt: u32) -> Result<Self, Error> {
+    fn create(code: &str, opt: u32) -> Result<Self, Error> {
         let mut program = Program::<C>::parse(code)?;
-        if !no_opt {
-            program = program.optimize(opt);
-        }
+        program = program.optimize(opt);
         Ok(BaseInterpreter { program })
     }
 

@@ -1,17 +1,15 @@
 //! Library for executing Brainfuck programs.
 
-mod exec;
 mod hasher;
-mod ir;
-mod opt;
-mod runtime;
 mod smallvec;
 
-use std::{fmt::Debug, hash::Hash};
+pub mod bc;
+pub mod exec;
+pub mod ir;
+pub mod opt;
+pub mod runtime;
 
-pub use exec::{BaseInterpreter, Executor, InplaceInterpreter};
-pub use ir::{Block, Expr, Instr, Program};
-pub use runtime::{Context, Memory};
+use std::{fmt::Debug, hash::Hash};
 
 /// Kind of error that might be encountered during the parsing of a Brainfuck
 /// program or other operations preventing execution.
@@ -43,14 +41,14 @@ pub trait CellType: Copy + Ord + Hash + Debug + 'static {
     const ONE: Self;
     const NEG_ONE: Self;
 
-    /// Convert an input byte into a cell value.
-    fn from_u8(val: u8) -> Self;
-
-    /// Convert a cell value into an output byte.
-    fn into_u8(self) -> u8;
-
-    /// Convert a cell value into an unsigned 64 bit value.
+    /// Convert a cell value into an unsigned 64 bit value. Zero extend.
     fn into_u64(self) -> u64;
+
+    /// Convert a cell value into an signed 64 bit value. Sign extend.
+    fn into_i64(self) -> i64;
+
+    /// Convert from an unsigned 64 bit value to a cell value.
+    fn from_u64(val: u64) -> Self;
 
     /// Wrapping addition.
     fn wrapping_add(self, rhs: Self) -> Self;
@@ -148,6 +146,26 @@ pub trait CellType: Copy + Ord + Hash + Debug + 'static {
             )
         }
     }
+
+    /// Convert an input byte into a cell value.
+    fn from_u8(val: u8) -> Self {
+        Self::from_u64(val as u64)
+    }
+
+    /// Convert a cell value into an output byte.
+    fn into_u8(self) -> u8 {
+        self.into_u64() as u8
+    }
+
+    /// Convert a signed 16 bit integer into a cell value.
+    fn from_i16(val: i16) -> Self {
+        Self::from_u64(val as i64 as u64)
+    }
+
+    /// Convert a cell value into a signed 16 bit integer, if possible.
+    fn try_into_i16(self) -> Option<i16> {
+        self.into_i64().try_into().ok()
+    }
 }
 
 impl CellType for u8 {
@@ -157,16 +175,16 @@ impl CellType for u8 {
     const ONE: Self = 1;
     const NEG_ONE: Self = u8::MAX;
 
-    fn from_u8(val: u8) -> Self {
-        val
-    }
-
-    fn into_u8(self) -> u8 {
-        self
-    }
-
     fn into_u64(self) -> u64 {
         self as u64
+    }
+
+    fn from_u64(val: u64) -> Self {
+        val as u8
+    }
+
+    fn into_i64(self) -> i64 {
+        self as i8 as i64
     }
 
     fn wrapping_add(self, rhs: Self) -> Self {
@@ -205,16 +223,16 @@ impl CellType for u16 {
     const ONE: Self = 1;
     const NEG_ONE: Self = u16::MAX;
 
-    fn from_u8(val: u8) -> Self {
+    fn into_u64(self) -> u64 {
+        self as u64
+    }
+
+    fn from_u64(val: u64) -> Self {
         val as u16
     }
 
-    fn into_u8(self) -> u8 {
-        self as u8
-    }
-
-    fn into_u64(self) -> u64 {
-        self as u64
+    fn into_i64(self) -> i64 {
+        self as i16 as i64
     }
 
     fn wrapping_add(self, rhs: Self) -> Self {
@@ -253,16 +271,16 @@ impl CellType for u32 {
     const ONE: Self = 1;
     const NEG_ONE: Self = u32::MAX;
 
-    fn from_u8(val: u8) -> Self {
+    fn into_u64(self) -> u64 {
+        self as u64
+    }
+
+    fn from_u64(val: u64) -> Self {
         val as u32
     }
 
-    fn into_u8(self) -> u8 {
-        self as u8
-    }
-
-    fn into_u64(self) -> u64 {
-        self as u64
+    fn into_i64(self) -> i64 {
+        self as i32 as i64
     }
 
     fn wrapping_add(self, rhs: Self) -> Self {
@@ -301,16 +319,16 @@ impl CellType for u64 {
     const ONE: Self = 1;
     const NEG_ONE: Self = u64::MAX;
 
-    fn from_u8(val: u8) -> Self {
-        val as u64
-    }
-
-    fn into_u8(self) -> u8 {
-        self as u8
-    }
-
     fn into_u64(self) -> u64 {
         self
+    }
+
+    fn from_u64(val: u64) -> Self {
+        val
+    }
+
+    fn into_i64(self) -> i64 {
+        self as i64
     }
 
     fn wrapping_add(self, rhs: Self) -> Self {

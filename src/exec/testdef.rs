@@ -2,7 +2,7 @@ macro_rules! executor_tests {
     ($i:ident) => {
         #[cfg(test)]
         mod tests {
-            use crate::{$i, Context, Error, Executor};
+            use crate::{exec::{Executor, $i}, runtime::Context, Error};
 
             #[test]
             fn simple_execution() -> Result<(), Error<'static>> {
@@ -11,7 +11,7 @@ macro_rules! executor_tests {
                 // https://esolangs.org/wiki/Brainfuck#Examples
                 let code = ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
                             +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.";
-                let exec = $i::<u8>::create(code, false, 1)?;
+                let exec = $i::<u8>::create(code, 2)?;
                 exec.execute(&mut ctx)?;
                 drop(ctx);
                 assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
@@ -25,7 +25,7 @@ macro_rules! executor_tests {
                 // https://esolangs.org/wiki/Brainfuck#Examples
                 let code = ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
                             +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.";
-                let exec = $i::<u16>::create(code, false, 1)?;
+                let exec = $i::<u16>::create(code, 2)?;
                 exec.execute(&mut ctx)?;
                 drop(ctx);
                 assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
@@ -39,7 +39,7 @@ macro_rules! executor_tests {
                 // https://esolangs.org/wiki/Brainfuck#Examples
                 let code = ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
                             +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.";
-                let exec = $i::<u32>::create(code, false, 1)?;
+                let exec = $i::<u32>::create(code, 2)?;
                 exec.execute(&mut ctx)?;
                 drop(ctx);
                 assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
@@ -53,7 +53,7 @@ macro_rules! executor_tests {
                 // https://esolangs.org/wiki/Brainfuck#Examples
                 let code = ">++++++++[-<+++++++++>]<.>>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.>->
                             +++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.";
-                let exec = $i::<u64>::create(code, false, 1)?;
+                let exec = $i::<u64>::create(code, 2)?;
                 exec.execute(&mut ctx)?;
                 drop(ctx);
                 assert_eq!(String::from_utf8(buf).unwrap(), "Hello World!\n");
@@ -68,7 +68,7 @@ macro_rules! executor_tests {
                 // https://brainfuck.org/tests.b
                 let code = "++++[>++++++<-]>[>+++++>+++++++<<-]>>++++<[[>[[
                             >>+<<-]<]>>>-]>-[>+>+<<-]>]+++++[>+++++++<<++>-]>.<<.";
-                let exec = $i::<u64>::create(code, false, 1)?;
+                let exec = $i::<u64>::create(code, 2)?;
                 exec.execute(&mut ctx)?;
                 drop(ctx);
                 assert_eq!(String::from_utf8(buf).unwrap(), "#\n");
@@ -82,7 +82,7 @@ macro_rules! executor_tests {
                 // https://brainfuck.org/tests.b
                 let code = "[]++++++++++[>>+>+>++++++[<<+<+++>>>-]<<<<-]
                             \"A*$\";?@![#>>+<<]>[>>]<<<<[>++<[-]]>.>.";
-                let exec = $i::<u64>::create(code, false, 1)?;
+                let exec = $i::<u64>::create(code, 2)?;
                 exec.execute(&mut ctx)?;
                 drop(ctx);
                 assert_eq!(String::from_utf8(buf).unwrap(), "H\n");
@@ -116,7 +116,7 @@ macro_rules! executor_tests {
                     [>++++++++++++++<-
                     [>+<-]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
                     ]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]>.[-]<,]";
-                let exec = $i::<u8>::create(code, false, 1)?;
+                let exec = $i::<u8>::create(code, 2)?;
                 exec.execute(&mut ctx)?;
                 drop(ctx);
                 assert_eq!(String::from_utf8(buf).unwrap(), "~zyx mlk");
@@ -145,8 +145,8 @@ macro_rules! same_as_inplace_test_inner {
             Some(Box::new(&input[..])),
             Some(Box::new(&mut out_to_test[..])),
         );
-        InplaceInterpreter::<u8>::create(code, false, 3)?.execute(&mut ctx_inplace)?;
-        $i::<u8>::create(code, false, 3)?.execute(&mut ctx_to_test)?;
+        InplaceInterpreter::<u8>::create(code, 3)?.execute(&mut ctx_inplace)?;
+        $i::<u8>::create(code, 3)?.execute(&mut ctx_to_test)?;
         drop(ctx_inplace);
         drop(ctx_to_test);
         assert_eq!(out_to_test, out_inplace);
@@ -179,7 +179,7 @@ macro_rules! same_as_inplace_tests {
     ($i:ident) => {
         #[cfg(test)]
         mod tests_same_as_inplace {
-            use crate::{$i, Context, Error, Executor, InplaceInterpreter};
+            use crate::{exec::{Executor, InplaceInterpreter, $i}, runtime::Context, Error};
 
             // Test cases that have previously caused issues found using fuzzing.
             same_as_inplace_test!($i, "<+[-..+]", infinite_loop_with_canceling_cond);
