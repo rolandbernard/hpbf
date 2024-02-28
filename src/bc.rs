@@ -1,8 +1,10 @@
 //! Contains transformation form the IR to the interpreter Bytecode.
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    cmp::Reverse,
+    collections::{BTreeSet, BinaryHeap, HashMap, HashSet},
     fmt::{self, Debug},
+    mem,
 };
 
 use crate::{
@@ -11,7 +13,7 @@ use crate::{
 };
 
 /// Location form which to load or store values.
-#[derive(PartialEq, Hash)]
+#[derive(PartialEq, Hash, Clone, Copy)]
 pub enum Loc<C: CellType> {
     Mem(isize),
     Tmp(usize),
@@ -20,7 +22,7 @@ pub enum Loc<C: CellType> {
 
 /// Instruction representation for the bytecode. Only select instructions use
 /// [`Loc`]. All other access memory only.
-#[derive(PartialEq, Hash)]
+#[derive(PartialEq, Hash, Clone, Copy)]
 pub enum Instr<C: CellType> {
     Noop,
     Scan(isize, isize),
@@ -56,7 +58,8 @@ struct Analysis {
 /// Live range information for the temporaries, used later on during temp allocation.
 struct RangeInfo {
     created: usize,
-    last_used: Option<usize>,
+    first_use: Option<usize>,
+    last_use: Option<usize>,
     num_uses: usize,
 }
 
@@ -177,16 +180,24 @@ impl<C: CellType> ir::CodeGen<C> for CodeGen<C> {
 }
 
 impl<C: CellType> CodeGen<C> {
-    /// Record in the live ranges that the given `value` has been accessed.
-    fn read(&mut self, value: usize) {
+    /// Like a read, but does not increment the uses counter, only extends the range.
+    fn range_extend(&mut self, value: usize) {
         if self.ranges[value].created < self.current_start {
-            if self.ranges[value].last_used.is_none()
-                || self.ranges[value].last_used.unwrap() < self.current_start
+            if self.ranges[value].last_use.is_none()
+                || self.ranges[value].last_use.unwrap() < self.current_start
             {
                 self.outer_accessed.push(value);
             }
         }
-        self.ranges[value].last_used = Some(2 * self.insts.len());
+        if self.ranges[value].first_use.is_none() {
+            self.ranges[value].first_use = Some(self.insts.len());
+        }
+        self.ranges[value].last_use = Some(self.insts.len());
+    }
+
+    /// Record in the live ranges that the given `value` has been accessed.
+    fn read(&mut self, value: usize) {
+        self.range_extend(value);
         self.ranges[value].num_uses += 1;
     }
 
@@ -198,8 +209,9 @@ impl<C: CellType> CodeGen<C> {
         } else {
             let value = self.ranges.len();
             self.ranges.push(RangeInfo {
-                created: 2 * self.insts.len() + 1,
-                last_used: None,
+                created: self.insts.len(),
+                first_use: None,
+                last_use: None,
                 num_uses: 0,
             });
             if let GvnExpr::Add(a, b) | GvnExpr::Sub(a, b) | GvnExpr::Mul(a, b) = expr {
@@ -229,12 +241,12 @@ impl<C: CellType> CodeGen<C> {
     /// the value of the given temporary `value`.
     fn mem_write(&mut self, var: isize, value: usize) {
         self.read(value);
-        self.values.insert(GvnExpr::Mem(var), value);
-        self.insts.push(Instr::Copy(Loc::Mem(var), Loc::Tmp(value)));
         self.writes
             .entry(var)
             .or_insert(BTreeSet::new())
-            .insert(2 * self.insts.len() + 1);
+            .insert(self.insts.len());
+        self.values.insert(GvnExpr::Mem(var), value);
+        self.insts.push(Instr::Copy(Loc::Mem(var), Loc::Tmp(value)));
     }
 
     /// Emit the instructions for the inside of the given block. This does not
@@ -275,7 +287,7 @@ impl<C: CellType> CodeGen<C> {
                     let start_addr = self.insts.len();
                     if !is_loop || !block.insts.is_empty() {
                         if is_loop {
-                            self.current_start = 2 * self.insts.len();
+                            self.current_start = self.insts.len();
                         }
                         self.insts.push(Instr::Noop);
                         self.emit_block(block, sub_anal);
@@ -294,7 +306,7 @@ impl<C: CellType> CodeGen<C> {
                             while i < self.outer_accessed.len() {
                                 let var = self.outer_accessed[i];
                                 if self.ranges[var].created > self.current_start {
-                                    self.read(var);
+                                    self.range_extend(var);
                                     self.outer_accessed.swap_remove(i);
                                 } else {
                                     i += 1;
@@ -321,12 +333,229 @@ impl<C: CellType> CodeGen<C> {
         }
     }
 
+    /// Eliminate trivially dead stores. This is only a local pass.
+    fn dead_store_elim(&mut self) {
+        let mut dead = HashSet::new();
+        for i in (0..self.insts.len()).rev() {
+            match self.insts[i] {
+                Instr::Add(dst, src0, src1)
+                | Instr::Sub(dst, src0, src1)
+                | Instr::Mul(dst, src0, src1) => {
+                    if let Loc::Mem(mem) = dst {
+                        if dead.contains(&mem) {
+                            for src in [src0, src1] {
+                                if let Loc::Tmp(tmp) = src {
+                                    self.ranges[tmp].num_uses -= 1;
+                                }
+                            }
+                            self.insts[i] = Instr::Noop;
+                            continue;
+                        }
+                        dead.insert(mem);
+                    }
+                }
+                Instr::Copy(dst, src) => {
+                    if let Loc::Mem(mem) = dst {
+                        if dead.contains(&mem) {
+                            if let Loc::Tmp(tmp) = src {
+                                self.ranges[tmp].num_uses -= 1;
+                            }
+                            self.insts[i] = Instr::Noop;
+                            continue;
+                        }
+                        dead.insert(mem);
+                    }
+                }
+                _ => { /* No store here. */ }
+            }
+            match self.insts[i] {
+                Instr::Noop | Instr::Check(_) | Instr::Check2(_, _) => { /* Does nothing. */ }
+                Instr::Add(_, src0, src1)
+                | Instr::Sub(_, src0, src1)
+                | Instr::Mul(_, src0, src1) => {
+                    for src in [src0, src1] {
+                        if let Loc::Mem(mem) = src {
+                            dead.remove(&mem);
+                        }
+                    }
+                }
+                Instr::Copy(_, src) => {
+                    if let Loc::Mem(mem) = src {
+                        dead.remove(&mem);
+                    }
+                }
+                Instr::BrNZ(_, _) | Instr::BrZ(_, _) | Instr::Mov(_) => {
+                    dead.clear();
+                }
+                Instr::Scan(mem, _) | Instr::Out(mem) => {
+                    dead.remove(&mem);
+                }
+                Instr::Inp(mem) => {
+                    dead.insert(mem);
+                }
+            }
+        }
+    }
+
     /// Try to more efficiently allocate the necessary temporaries using the computed
-    /// live ranges information and write sets. `num_regs` indicates the number of
-    /// temporaries that are expected to be particularly fast. Therefore the allocator
-    /// will try to allocate these in the first `num_regs` temporaries.
-    fn allocate_temps(&mut self, _num_regs: usize) {
-        // TODO
+    /// live ranges information and write sets.
+    fn allocate_temps(&mut self, num_regs: usize) {
+        let mut next_fresh = num_regs;
+        let mut free_regs = BinaryHeap::new();
+        for i in 0..num_regs {
+            free_regs.push(Reverse(i));
+        }
+        let mut free_temps = BinaryHeap::new();
+        let mut replacements = HashMap::new();
+        for i in 0..self.insts.len() {
+            match self.insts[i] {
+                Instr::Add(dst, src0, src1)
+                | Instr::Sub(dst, src0, src1)
+                | Instr::Mul(dst, src0, src1) => {
+                    if let Loc::Tmp(tmp) = dst {
+                        if let Some(last_use) = self.ranges[tmp].last_use {
+                            let first_use = self.ranges[tmp].first_use.unwrap();
+                            let num_uses = self.ranges[tmp].num_uses;
+                            if let Instr::Copy(Loc::Mem(mem), _) = self.insts[first_use] {
+                                if last_use == first_use
+                                    && num_uses == 1
+                                    && [src0, src1].into_iter().all(|src| {
+                                        !matches!(src,
+                                        Loc::Mem(m) if self.writes.get(&m).is_some_and(|w| {
+                                            w.range(i..first_use - 1).any(|_| true)
+                                        }))
+                                    })
+                                {
+                                    self.insts[first_use] = self.insts[i];
+                                    self.insts[i] = Instr::Noop;
+                                    if let Instr::Add(dst, _, _)
+                                    | Instr::Sub(dst, _, _)
+                                    | Instr::Mul(dst, _, _) = &mut self.insts[first_use]
+                                    {
+                                        *dst = Loc::Mem(mem);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => { /* Handled later. */ }
+            }
+            let mut read_temp = |tmp: usize| {
+                let (new_loc, uses) = replacements.get_mut(&tmp).unwrap();
+                let new_loc = *new_loc;
+                *uses -= 1;
+                if *uses == 0 {
+                    if let Loc::Tmp(tmp) = new_loc {
+                        if tmp < num_regs {
+                            free_regs.push(Reverse(tmp));
+                        } else {
+                            free_temps.push(Reverse(tmp));
+                        }
+                    }
+                    replacements.remove(&tmp);
+                }
+                new_loc
+            };
+            match &mut self.insts[i] {
+                Instr::Add(_, src0, src1)
+                | Instr::Sub(_, src0, src1)
+                | Instr::Mul(_, src0, src1) => {
+                    for src in [src0, src1] {
+                        if let Loc::Tmp(tmp) = src {
+                            *src = read_temp(*tmp);
+                        }
+                    }
+                }
+                Instr::Copy(_, src) => {
+                    if let Loc::Tmp(tmp) = src {
+                        *src = read_temp(*tmp);
+                    }
+                }
+                _ => { /* These do not access temps. */ }
+            }
+            let mut alloc_temp = |old: usize| {
+                let live = self.ranges[old].last_use.unwrap() - i;
+                let mut tmp = None;
+                if live < 16 {
+                    // Don't allocate registers to temps with long live ranges.
+                    tmp = free_regs.pop();
+                }
+                if tmp.is_none() {
+                    tmp = free_temps.pop();
+                }
+                if tmp.is_none() {
+                    tmp = Some(Reverse(next_fresh));
+                    next_fresh += 1;
+                }
+                let Reverse(tmp) = tmp.unwrap();
+                replacements.insert(old, (Loc::Tmp(tmp), self.ranges[old].num_uses));
+                Loc::Tmp(tmp)
+            };
+            match &mut self.insts[i] {
+                Instr::Add(dst, _, _) | Instr::Sub(dst, _, _) | Instr::Mul(dst, _, _) => {
+                    if let Loc::Tmp(tmp) = dst {
+                        if self.ranges[*tmp].num_uses != 0 {
+                            *dst = alloc_temp(*tmp);
+                        } else {
+                            self.insts[i] = Instr::Noop;
+                        }
+                    }
+                }
+                Instr::Copy(dst, src) => {
+                    if let Loc::Tmp(tmp) = dst {
+                        if let Some(last_use) = self.ranges[*tmp].last_use {
+                            let num_uses = self.ranges[*tmp].num_uses;
+                            if num_uses == 0 {
+                                self.insts[i] = Instr::Noop;
+                            } else {
+                                if let Loc::Imm(_) = src {
+                                    replacements.insert(*tmp, (*src, num_uses));
+                                    self.insts[i] = Instr::Noop;
+                                } else if let Loc::Mem(mem) = src {
+                                    if num_uses != 1
+                                        || self
+                                            .writes
+                                            .get(mem)
+                                            .is_some_and(|w| w.range(i..last_use).any(|_| true))
+                                    {
+                                        *dst = alloc_temp(*tmp);
+                                    } else {
+                                        replacements.insert(*tmp, (*src, num_uses));
+                                        self.insts[i] = Instr::Noop;
+                                    }
+                                } else {
+                                    *dst = alloc_temp(*tmp);
+                                }
+                            }
+                        } else {
+                            self.insts[i] = Instr::Noop;
+                        }
+                    }
+                }
+                _ => { /* These do not access temps. */ }
+            }
+        }
+        assert!(replacements.is_empty());
+    }
+
+    /// Try to reorder the parameters of Add and Mul instructions, such that if the
+    /// destination is the same as one of the parameters, that parameter is first.
+    /// Further, this pass tries to put immediate as the last parameter.
+    fn parameter_reordering(&mut self) {
+        for i in (0..self.insts.len()).rev() {
+            match &mut self.insts[i] {
+                Instr::Add(dst, src0, src1) | Instr::Mul(dst, src0, src1) => {
+                    if dst == src1 {
+                        mem::swap(src0, src1);
+                    }
+                    if matches!(src0, Loc::Imm(_)) {
+                        mem::swap(src0, src1);
+                    }
+                }
+                _ => { /* Not commutative. */ }
+            }
+        }
     }
 
     /// The temporary allocation algorithm will likely generate a lot of noop
@@ -378,7 +607,9 @@ impl<C: CellType> CodeGen<C> {
             .insts
             .push(Instr::Check2(codegen.min_accessed, codegen.max_accessed));
         codegen.emit_block(program, &analysis);
+        codegen.dead_store_elim();
         codegen.allocate_temps(num_regs);
+        codegen.parameter_reordering();
         codegen.strip_noops();
         let temp_size = codegen.count_temps();
         Program {

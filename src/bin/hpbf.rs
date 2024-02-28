@@ -87,7 +87,6 @@ fn execute_code<C: CellType>(code: &str, kind: ExecutorKind, opt: u32) -> Result
             exec.execute(&mut cxt)?;
         }
     }
-    // }
     Ok(())
 }
 

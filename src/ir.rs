@@ -690,13 +690,13 @@ impl<C: CellType> Expr<C> {
                 }
             }
             let mut result = codegen_part(sorted[0], codegen, &ordering)?;
-            if sorted[0].coef == C::NEG_ONE {
+            if !sorted[0].vars.is_empty() && sorted[0].coef == C::NEG_ONE {
                 let zero = codegen.imm(C::ZERO)?;
                 result = codegen.sub(zero, result)?;
             }
             for part in sorted.into_iter().skip(1) {
                 let part_res = codegen_part(part, codegen, &ordering)?;
-                if part.coef == C::NEG_ONE {
+                if !part.vars.is_empty() && part.coef == C::NEG_ONE {
                     result = codegen.sub(result, part_res)?;
                 } else {
                     result = codegen.add(result, part_res)?;
