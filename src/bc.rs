@@ -27,8 +27,6 @@ pub enum Instr<C: CellType> {
     Noop,
     Scan(isize, isize),
     Mov(isize),
-    Check(isize),
-    Check2(isize, isize),
     Inp(isize),
     Out(isize),
     BrZ(isize, isize),
@@ -43,6 +41,8 @@ pub enum Instr<C: CellType> {
 /// also the number of necessary temporaries.
 pub struct Program<C: CellType> {
     temps: usize,
+    min_accessed: isize,
+    max_accessed: isize,
     insts: Vec<Instr<C>>,
 }
 
@@ -291,13 +291,13 @@ impl<C: CellType> CodeGen<C> {
                         }
                         self.insts.push(Instr::Noop);
                         self.emit_block(block, sub_anal);
+                        if block.shift != 0 {
+                            self.insts.push(Instr::Mov(block.shift))
+                        }
                     } else {
-                        self.insts.push(Instr::Scan(*cond, block.shift));
-                    }
-                    if block.shift < 0 {
-                        self.insts.push(Instr::Check(self.min_accessed))
-                    } else if block.shift > 0 {
-                        self.insts.push(Instr::Check(self.max_accessed))
+                        if block.shift != 0 {
+                            self.insts.push(Instr::Scan(*cond, block.shift));
+                        }
                     }
                     if !is_loop || !block.insts.is_empty() {
                         if is_loop {
@@ -327,9 +327,6 @@ impl<C: CellType> CodeGen<C> {
                     block_idx += 1;
                 }
             }
-        }
-        if block.shift != 0 {
-            self.insts.push(Instr::Mov(block.shift));
         }
     }
 
@@ -369,7 +366,7 @@ impl<C: CellType> CodeGen<C> {
                 _ => { /* No store here. */ }
             }
             match self.insts[i] {
-                Instr::Noop | Instr::Check(_) | Instr::Check2(_, _) => { /* Does nothing. */ }
+                Instr::Noop => { /* Does nothing. */ }
                 Instr::Add(_, src0, src1)
                 | Instr::Sub(_, src0, src1)
                 | Instr::Mul(_, src0, src1) => {
@@ -384,10 +381,10 @@ impl<C: CellType> CodeGen<C> {
                         dead.remove(&mem);
                     }
                 }
-                Instr::BrNZ(_, _) | Instr::BrZ(_, _) | Instr::Mov(_) => {
+                Instr::BrNZ(_, _) | Instr::BrZ(_, _) | Instr::Mov(_) | Instr::Scan(_, _) => {
                     dead.clear();
                 }
-                Instr::Scan(mem, _) | Instr::Out(mem) => {
+                Instr::Out(mem) => {
                     dead.remove(&mem);
                 }
                 Instr::Inp(mem) => {
@@ -395,6 +392,16 @@ impl<C: CellType> CodeGen<C> {
                 }
             }
         }
+    }
+
+    /// Test whether the given memory location has a write in the given range.
+    /// Inclusive `from` exclusive `to`.
+    fn has_write_in_range(&self, var: isize, from: usize, to: usize) -> bool {
+        from < to
+            && self
+                .writes
+                .get(&var)
+                .is_some_and(|w| w.range(from..to).any(|_| true))
     }
 
     /// Try to more efficiently allocate the necessary temporaries using the computed
@@ -417,15 +424,15 @@ impl<C: CellType> CodeGen<C> {
                             let first_use = self.ranges[tmp].first_use.unwrap();
                             let num_uses = self.ranges[tmp].num_uses;
                             if let Instr::Copy(Loc::Mem(mem), _) = self.insts[first_use] {
-                                if last_use == first_use
-                                    && num_uses == 1
+                                if num_uses == 1
+                                    && !self.has_write_in_range(mem, first_use + 1, last_use)
                                     && [src0, src1].into_iter().all(|src| {
-                                        !matches!(src,
-                                        Loc::Mem(m) if self.writes.get(&m).is_some_and(|w| {
-                                            w.range(i..first_use - 1).any(|_| true)
-                                        }))
+                                        !matches!(src, Loc::Mem(m) if self.has_write_in_range(m, i, first_use))
                                     })
                                 {
+                                    if num_uses - 1 != 0 {
+                                        replacements.insert(tmp, (Loc::Mem(mem), num_uses - 1));
+                                    }
                                     self.insts[first_use] = self.insts[i];
                                     self.insts[i] = Instr::Noop;
                                     if let Instr::Add(dst, _, _)
@@ -474,29 +481,47 @@ impl<C: CellType> CodeGen<C> {
                 }
                 _ => { /* These do not access temps. */ }
             }
-            let mut alloc_temp = |old: usize| {
-                let live = self.ranges[old].last_use.unwrap() - i;
-                let mut tmp = None;
-                if live < 16 {
-                    // Don't allocate registers to temps with long live ranges.
-                    tmp = free_regs.pop();
+            let can_alloc_reg = match self.insts[i] {
+                Instr::Add(Loc::Tmp(tmp), _, _)
+                | Instr::Sub(Loc::Tmp(tmp), _, _)
+                | Instr::Mul(Loc::Tmp(tmp), _, _)
+                | Instr::Copy(Loc::Tmp(tmp), _) => {
+                    let live = self.ranges[tmp].last_use.unwrap() - i;
+                    live < 16 && !free_regs.is_empty()
                 }
-                if tmp.is_none() {
-                    tmp = free_temps.pop();
-                }
-                if tmp.is_none() {
-                    tmp = Some(Reverse(next_fresh));
-                    next_fresh += 1;
-                }
-                let Reverse(tmp) = tmp.unwrap();
-                replacements.insert(old, (Loc::Tmp(tmp), self.ranges[old].num_uses));
-                Loc::Tmp(tmp)
+                _ => false,
             };
-            match &mut self.insts[i] {
+            let mut alloc_temp = |instr: &mut Instr<C>| {
+                if let Instr::Add(dst, _, _)
+                | Instr::Sub(dst, _, _)
+                | Instr::Mul(dst, _, _)
+                | Instr::Copy(dst, _) = instr
+                {
+                    if let Loc::Tmp(old) = dst {
+                        let live = self.ranges[*old].last_use.unwrap() - i;
+                        let mut tmp = None;
+                        if live < 16 {
+                            // Don't allocate registers to temps with long live ranges.
+                            tmp = free_regs.pop();
+                        }
+                        if tmp.is_none() {
+                            tmp = free_temps.pop();
+                        }
+                        if tmp.is_none() {
+                            tmp = Some(Reverse(next_fresh));
+                            next_fresh += 1;
+                        }
+                        let Reverse(tmp) = tmp.unwrap();
+                        replacements.insert(*old, (Loc::Tmp(tmp), self.ranges[*old].num_uses));
+                        *dst = Loc::Tmp(tmp);
+                    }
+                }
+            };
+            match self.insts[i] {
                 Instr::Add(dst, _, _) | Instr::Sub(dst, _, _) | Instr::Mul(dst, _, _) => {
                     if let Loc::Tmp(tmp) = dst {
-                        if self.ranges[*tmp].num_uses != 0 {
-                            *dst = alloc_temp(*tmp);
+                        if self.ranges[tmp].num_uses != 0 {
+                            alloc_temp(&mut self.insts[i]);
                         } else {
                             self.insts[i] = Instr::Noop;
                         }
@@ -504,28 +529,25 @@ impl<C: CellType> CodeGen<C> {
                 }
                 Instr::Copy(dst, src) => {
                     if let Loc::Tmp(tmp) = dst {
-                        if let Some(last_use) = self.ranges[*tmp].last_use {
-                            let num_uses = self.ranges[*tmp].num_uses;
+                        if let Some(last_use) = self.ranges[tmp].last_use {
+                            let num_uses = self.ranges[tmp].num_uses;
                             if num_uses == 0 {
                                 self.insts[i] = Instr::Noop;
                             } else {
                                 if let Loc::Imm(_) = src {
-                                    replacements.insert(*tmp, (*src, num_uses));
+                                    replacements.insert(tmp, (src, num_uses));
                                     self.insts[i] = Instr::Noop;
                                 } else if let Loc::Mem(mem) = src {
-                                    if num_uses != 1
-                                        || self
-                                            .writes
-                                            .get(mem)
-                                            .is_some_and(|w| w.range(i..last_use).any(|_| true))
+                                    if (num_uses == 1 || !can_alloc_reg)
+                                        && !self.has_write_in_range(mem, i, last_use)
                                     {
-                                        *dst = alloc_temp(*tmp);
-                                    } else {
-                                        replacements.insert(*tmp, (*src, num_uses));
+                                        replacements.insert(tmp, (src, num_uses));
                                         self.insts[i] = Instr::Noop;
+                                    } else {
+                                        alloc_temp(&mut self.insts[i]);
                                     }
                                 } else {
-                                    *dst = alloc_temp(*tmp);
+                                    alloc_temp(&mut self.insts[i]);
                                 }
                             }
                         } else {
@@ -563,7 +585,21 @@ impl<C: CellType> CodeGen<C> {
     /// preceding passes these are only removed at the end, as that requires
     /// fixing of the branch target offsets.
     fn strip_noops(&mut self) {
-        // TODO
+        let mut cum_noop = Vec::with_capacity(self.insts.len() + 1);
+        cum_noop.push(0);
+        for instr in &self.insts {
+            cum_noop.push(*cum_noop.last().unwrap());
+            if let Instr::Noop = instr {
+                *cum_noop.last_mut().unwrap() += 1;
+            }
+        }
+        for (i, instr) in self.insts.iter_mut().enumerate() {
+            if let Instr::BrZ(_, off) | Instr::BrNZ(_, off) = instr {
+                let target = i.saturating_add_signed(*off);
+                *off -= cum_noop[target] - cum_noop[i];
+            }
+        }
+        self.insts.retain(|inst| !matches!(inst, Instr::Noop));
     }
 
     /// Return the number of temporary variables needed to execute this program.
@@ -603,9 +639,6 @@ impl<C: CellType> CodeGen<C> {
             current_start: 0,
             outer_accessed: Vec::new(),
         };
-        codegen
-            .insts
-            .push(Instr::Check2(codegen.min_accessed, codegen.max_accessed));
         codegen.emit_block(program, &analysis);
         codegen.dead_store_elim();
         codegen.allocate_temps(num_regs);
@@ -614,6 +647,8 @@ impl<C: CellType> CodeGen<C> {
         let temp_size = codegen.count_temps();
         Program {
             temps: temp_size,
+            min_accessed: codegen.min_accessed,
+            max_accessed: codegen.max_accessed,
             insts: codegen.insts,
         }
     }
@@ -637,7 +672,9 @@ impl<C: CellType> Debug for Program<C> {
                 branch_target.insert(i.saturating_add_signed(*off));
             }
         }
-        writeln!(f, "; {} temps", self.temps)?;
+        writeln!(f, "; temps {}", self.temps)?;
+        writeln!(f, "; min {}", self.min_accessed)?;
+        writeln!(f, "; max {}", self.max_accessed)?;
         for (i, instr) in self.insts.iter().enumerate() {
             if branch_target.contains(&i) {
                 writeln!(f, ".L{i}")?;
@@ -646,8 +683,6 @@ impl<C: CellType> Debug for Program<C> {
                 Instr::Noop => writeln!(f, "  noop")?,
                 Instr::Scan(cond, shift) => writeln!(f, "  scan [{cond}], {shift}")?,
                 Instr::Mov(shift) => writeln!(f, "  mov {shift}")?,
-                Instr::Check(var) => writeln!(f, "  check [{var}]")?,
-                Instr::Check2(min, max) => writeln!(f, "  check2 [{min}], [{max}]")?,
                 Instr::Inp(dst) => writeln!(f, "  inp [{dst}]")?,
                 Instr::Out(src) => writeln!(f, "  out [{src}]")?,
                 Instr::BrZ(cond, off) => {
@@ -661,6 +696,9 @@ impl<C: CellType> Debug for Program<C> {
                 Instr::Mul(dst, src0, src1) => writeln!(f, "  mul {dst:?}, {src0:?}, {src1:?}")?,
                 Instr::Copy(dst, src) => writeln!(f, "  copy {dst:?}, {src:?}")?,
             }
+        }
+        if branch_target.contains(&self.insts.len()) {
+            writeln!(f, ".L{}", self.insts.len())?;
         }
         Ok(())
     }
