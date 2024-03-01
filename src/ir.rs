@@ -314,7 +314,7 @@ impl<C: CellType> Expr<C> {
     ///
     /// # Examples
     /// ```
-    /// # use hpbf::{Expr};
+    /// # use hpbf::ir::{Expr};
     /// let expr = Expr::<u8>::val(5);
     /// assert_eq!(expr.constant(), Some(5));
     /// let expr = Expr::<u8>::var(0).add(Expr::<u8>::val(5));
@@ -335,7 +335,7 @@ impl<C: CellType> Expr<C> {
     ///
     /// # Examples
     /// ```
-    /// # use hpbf::{Expr};
+    /// # use hpbf::ir::{Expr};
     /// let expr = Expr::<u8>::var(0).add(Expr::<u8>::val(5));
     /// assert_eq!(expr.inc_of(0), Some(Expr::val(5)));
     /// assert_eq!(expr.inc_of(1), None);
@@ -369,7 +369,7 @@ impl<C: CellType> Expr<C> {
     ///
     /// # Examples
     /// ```
-    /// # use hpbf::{Expr};
+    /// # use hpbf::ir::{Expr};
     /// let expr = Expr::<u8>::var(0).add(Expr::<u8>::val(5));
     /// assert_eq!(expr.prod_inc_of(0), Some((Expr::val(5), 1)));
     /// assert_eq!(expr.prod_inc_of(1), Some((expr, 0)));
@@ -447,7 +447,7 @@ impl<C: CellType> Expr<C> {
     ///
     /// # Examples
     /// ```
-    /// # use hpbf::{Expr};
+    /// # use hpbf::ir::{Expr};
     /// let expr = Expr::<u8>::val(5);
     /// assert_eq!(expr.const_inc_of(0), None);
     /// let expr = Expr::<u8>::var(0).add(Expr::<u8>::val(5));
@@ -481,7 +481,7 @@ impl<C: CellType> Expr<C> {
     ///
     /// # Examples
     /// ```
-    /// # use hpbf::{Expr};
+    /// # use hpbf::ir::{Expr};
     /// let expr = Expr::<u8>::var(0).mul(Expr::<u8>::val(5));
     /// assert_eq!(expr.prod_of(0), Some(Expr::val(5)));
     /// assert_eq!(expr.prod_of(1), None);
@@ -756,7 +756,7 @@ impl<C: CellType> Program<C> {
     ///
     /// # Examples
     /// ```
-    /// # use hpbf::{Program, Block, Instr, Error};
+    /// # use hpbf::{ir::{Program, Block, Instr}, Error};
     /// use Instr::*;
     /// let prog = Program::<u8>::parse("+[-->-[>>+>-----<<]<--<---]>-.")?;
     /// assert_eq!(prog,

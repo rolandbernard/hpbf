@@ -4,7 +4,7 @@ use std::{env, fs::File, io::Read, process::exit};
 
 use hpbf::{
     bc,
-    exec::{BaseInterpreter, Executor, InplaceInterpreter},
+    exec::{BcInterpreter, Executor, InplaceInterpreter, IrInterpreter},
     ir,
     runtime::Context,
     CellType, Error, ErrorKind,
@@ -15,7 +15,8 @@ enum ExecutorKind {
     PrintIr,
     PrintBc,
     Inplace,
-    BaseInt,
+    IrInt,
+    BcInt,
 }
 
 /// Print the CLI help text for this program to stdout.
@@ -29,7 +30,8 @@ fn print_help_text() {
     println!("   --print-ir       Print ir code to stdout and do not execute");
     println!("   --print-bc       Print byte code to stdout and do not execute");
     println!("   --inplace        Use the inplace non-optimizing interpreter");
-    println!("   --base-int       Use the baseline slightly optimizing interpreter");
+    println!("   --ir-int         Use the internal IR interpreter");
+    println!("   --bc-int         Use the optimizing bytecode interpreter");
     println!("   -O{{0|1|2|3|4}}    Apply different levels of optimization");
     println!("   -i8              Run the code using a cell size of 8 bit");
     println!("   -i16             Run the code using a cell size of 16 bit");
@@ -82,8 +84,12 @@ fn execute_code<C: CellType>(code: &str, kind: ExecutorKind, opt: u32) -> Result
             let exec = InplaceInterpreter::<C>::create(code, opt)?;
             exec.execute(&mut cxt)?;
         }
-        ExecutorKind::BaseInt => {
-            let exec = BaseInterpreter::<C>::create(code, opt)?;
+        ExecutorKind::IrInt => {
+            let exec = IrInterpreter::<C>::create(code, opt)?;
+            exec.execute(&mut cxt)?;
+        }
+        ExecutorKind::BcInt => {
+            let exec = BcInterpreter::<C>::create(code, opt)?;
             exec.execute(&mut cxt)?;
         }
     }
@@ -93,7 +99,7 @@ fn execute_code<C: CellType>(code: &str, kind: ExecutorKind, opt: u32) -> Result
 fn main() {
     let mut bits = 8;
     let mut print_help = false;
-    let mut kind = ExecutorKind::BaseInt;
+    let mut kind = ExecutorKind::BcInt;
     let mut opt = 2;
     let mut has_error = false;
     let mut next_is_file = false;
@@ -126,7 +132,8 @@ fn main() {
                 "--print-ir" => kind = ExecutorKind::PrintIr,
                 "--print-bc" => kind = ExecutorKind::PrintBc,
                 "--inplace" => kind = ExecutorKind::Inplace,
-                "--base-int" => kind = ExecutorKind::BaseInt,
+                "--ir-int" => kind = ExecutorKind::IrInt,
+                "--bc-int" => kind = ExecutorKind::BcInt,
                 "-O0" => opt = 0,
                 "-O1" => opt = 1,
                 "-O2" => opt = 2,

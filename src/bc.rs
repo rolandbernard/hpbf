@@ -40,10 +40,10 @@ pub enum Instr<C: CellType> {
 /// Represents a bytecode program. Includes, in addition to the instructions,
 /// also the number of necessary temporaries.
 pub struct Program<C: CellType> {
-    temps: usize,
-    min_accessed: isize,
-    max_accessed: isize,
-    insts: Vec<Instr<C>>,
+    pub temps: usize,
+    pub min_accessed: isize,
+    pub max_accessed: isize,
+    pub insts: Vec<Instr<C>>,
 }
 
 /// Analysis result used for bytecode generation.
@@ -261,6 +261,10 @@ impl<C: CellType> CodeGen<C> {
                 }
                 ir::Instr::Input { dst } => {
                     self.values.remove(&GvnExpr::Mem(*dst));
+                    self.writes
+                        .entry(*dst)
+                        .or_insert(BTreeSet::new())
+                        .insert(self.insts.len());
                     self.insts.push(Instr::Inp(*dst));
                 }
                 ir::Instr::Calc { calcs } => {
@@ -568,10 +572,13 @@ impl<C: CellType> CodeGen<C> {
         for i in (0..self.insts.len()).rev() {
             match &mut self.insts[i] {
                 Instr::Add(dst, src0, src1) | Instr::Mul(dst, src0, src1) => {
-                    if dst == src1 {
+                    if matches!(src0, Loc::Tmp(_)) {
                         mem::swap(src0, src1);
                     }
                     if matches!(src0, Loc::Imm(_)) {
+                        mem::swap(src0, src1);
+                    }
+                    if dst == src1 {
                         mem::swap(src0, src1);
                     }
                 }
@@ -595,7 +602,7 @@ impl<C: CellType> CodeGen<C> {
         }
         for (i, instr) in self.insts.iter_mut().enumerate() {
             if let Instr::BrZ(_, off) | Instr::BrNZ(_, off) = instr {
-                let target = i.saturating_add_signed(*off);
+                let target = i.wrapping_add_signed(*off);
                 *off -= cum_noop[target] - cum_noop[i];
             }
         }
@@ -669,7 +676,7 @@ impl<C: CellType> Debug for Program<C> {
         let mut branch_target = HashSet::new();
         for (i, instr) in self.insts.iter().enumerate() {
             if let Instr::BrNZ(_, off) | Instr::BrZ(_, off) = instr {
-                branch_target.insert(i.saturating_add_signed(*off));
+                branch_target.insert(i.wrapping_add_signed(*off));
             }
         }
         writeln!(f, "; temps {}", self.temps)?;
@@ -686,10 +693,10 @@ impl<C: CellType> Debug for Program<C> {
                 Instr::Inp(dst) => writeln!(f, "  inp [{dst}]")?,
                 Instr::Out(src) => writeln!(f, "  out [{src}]")?,
                 Instr::BrZ(cond, off) => {
-                    writeln!(f, "  brz [{cond}], .L{}", i.saturating_add_signed(*off))?
+                    writeln!(f, "  brz [{cond}], .L{}", i.wrapping_add_signed(*off))?
                 }
                 Instr::BrNZ(cond, off) => {
-                    writeln!(f, "  brnz [{cond}], .L{}", i.saturating_add_signed(*off))?
+                    writeln!(f, "  brnz [{cond}], .L{}", i.wrapping_add_signed(*off))?
                 }
                 Instr::Add(dst, src0, src1) => writeln!(f, "  add {dst:?}, {src0:?}, {src1:?}")?,
                 Instr::Sub(dst, src0, src1) => writeln!(f, "  sub {dst:?}, {src0:?}, {src1:?}")?,

@@ -2,7 +2,7 @@
 //! the inplace interpreter.
 
 use std::{
-    collections::{hash_map::RandomState, HashMap, HashSet},
+    collections::hash_map::RandomState,
     env, fs,
     hash::{BuildHasher, DefaultHasher, Hash, Hasher},
     path::Path,
@@ -10,199 +10,38 @@ use std::{
 };
 
 use hpbf::{
-    exec::{BaseInterpreter, Executor, InplaceInterpreter},
+    exec::{BcInterpreter, Executor, InplaceInterpreter, IrInterpreter},
     runtime::Context,
     CellType,
 };
-
-/// State used to track variable information during the code generation for the
-/// fuzzing. This is required to ensure that every loop is either finite or performs
-/// some kind of output.
-struct GenState {
-    shift: isize,
-    sub_shift: bool,
-    has_out: bool,
-    initial_cond: Option<u64>,
-    written: HashSet<isize>,
-    known_loads: HashMap<isize, u64>,
-    known_adds: HashMap<isize, u64>,
-}
-
-impl GenState {
-    /// Create a new state with initial values.
-    fn new(initial_cond: Option<u64>) -> Self {
-        GenState {
-            shift: 0,
-            sub_shift: false,
-            has_out: false,
-            initial_cond,
-            written: HashSet::new(),
-            known_loads: HashMap::new(),
-            known_adds: HashMap::new(),
-        }
-    }
-
-    /// Return true if the loop is guaranteed to run a finite number of times.
-    /// Note that this by itself does not guarantee that the loop will ever
-    /// complete, e.g. if a contained loop is not finite.
-    fn finite(&self) -> bool {
-        if self.initial_cond == Some(0) {
-            true
-        } else if let Some(v) = self.known_loads.get(&self.shift) {
-            *v == 0
-        } else if self.sub_shift || self.shift != 0 {
-            false
-        } else if let Some(v) = self.known_adds.get(&0) {
-            v.is_odd()
-        } else {
-            false
-        }
-    }
-
-    /// After introducing an `+` instruction.
-    fn add(&mut self) {
-        if let Some(v) = self.known_loads.get_mut(&self.shift) {
-            *v = v.wrapping_add(1);
-        } else if !self.written.contains(&self.shift) {
-            let v = self.known_adds.entry(self.shift).or_insert(0);
-            *v = v.wrapping_add(1);
-        }
-    }
-
-    /// After introducing an `-` instruction.
-    fn sub(&mut self) {
-        if let Some(v) = self.known_loads.get_mut(&self.shift) {
-            *v = v.wrapping_sub(1);
-        } else if !self.written.contains(&self.shift) {
-            let v = self.known_adds.entry(self.shift).or_insert(0);
-            *v = v.wrapping_sub(1);
-        }
-    }
-
-    /// After introducing an `<` instruction.
-    fn left(&mut self) {
-        self.shift -= 1;
-    }
-
-    /// After introducing an `>` instruction.
-    fn right(&mut self) {
-        self.shift += 1;
-    }
-
-    /// After introducing an `,` instruction.
-    fn input(&mut self) {
-        self.written.insert(self.shift);
-        self.known_adds.remove(&self.shift);
-        self.known_loads.remove(&self.shift);
-    }
-
-    /// After introducing an `.` instruction.
-    fn output(&mut self) {
-        self.has_out = true;
-    }
-
-    /// After introducing an `[` instruction.
-    fn push(&mut self) -> Self {
-        let initial_cond = self.known_loads.get(&self.shift).copied();
-        GenState::new(initial_cond)
-    }
-
-    /// After introducing an `]` instruction.
-    fn pop(&mut self, prev_state: Self) -> bool {
-        let mut needs_out = false;
-        if prev_state.initial_cond != Some(0) {
-            if !prev_state.finite() && !prev_state.has_out {
-                needs_out = true
-            }
-            if prev_state.sub_shift || prev_state.shift != 0 {
-                self.sub_shift = true;
-                self.written.clear();
-                self.known_adds.clear();
-                self.known_loads.clear();
-            } else {
-                for &var in prev_state
-                    .known_adds
-                    .keys()
-                    .chain(prev_state.known_loads.keys())
-                    .chain(prev_state.written.iter())
-                {
-                    let var = self.shift + var;
-                    self.written.insert(var);
-                    self.known_adds.remove(&var);
-                    self.known_loads.remove(&var);
-                }
-            }
-            if prev_state.initial_cond.is_some() {
-                if prev_state.has_out {
-                    self.has_out = true;
-                }
-                for (&var, &val) in &prev_state.known_loads {
-                    self.known_loads
-                        .insert(self.shift + var - prev_state.shift, val);
-                }
-            }
-        }
-        self.written.remove(&self.shift);
-        self.known_adds.remove(&self.shift);
-        self.known_loads.insert(self.shift, 0);
-        needs_out
-    }
-}
 
 /// Generate a random Brainfuck program. The program is guaranteed to be syntactically
 /// valid and additionally guarantees that loops are either finite or print some output.
 fn generate_code(hasher: &mut impl Hasher, max_len: usize) -> String {
     let mut str = String::new();
-    let mut stack = vec![GenState::new(Some(0))];
-    while str.len() + 2 * (stack.len() - 1) < max_len {
+    let mut open = 0;
+    while str.len() + open < max_len {
         hasher.write_usize(str.len());
-        let state = stack.last_mut().unwrap();
         match hasher.finish() % 8 {
-            0 => {
-                str.push('+');
-                state.add();
-            }
-            1 => {
-                str.push('-');
-                state.sub();
-            }
-            2 => {
-                str.push('<');
-                state.left();
-            }
-            3 => {
-                str.push('>');
-                state.right();
-            }
-            4 => {
-                str.push(',');
-                state.input();
-            }
-            5 => {
-                str.push('.');
-                state.output();
-            }
+            0 => str.push('+'),
+            1 => str.push('-'),
+            2 => str.push('<'),
+            3 => str.push('>'),
+            4 => str.push(','),
+            5 => str.push('.'),
             6 => {
-                if stack.len() > 1 {
-                    let prev_state = stack.pop().unwrap();
-                    let state = stack.last_mut().unwrap();
-                    if state.pop(prev_state) {
-                        str.push('.');
-                    }
+                if open > 1 {
+                    open -= 1;
                     str.push(']');
                 }
             }
             _ => {
                 str.push('[');
-                let new = state.push();
-                stack.push(new);
+                open += 1
             }
         }
     }
-    for state in stack.into_iter().skip(1).rev() {
-        if !state.finite() && !state.has_out {
-            str.push('.');
-        }
+    for _ in 0..open {
         str.push(']');
     }
     return str;
@@ -210,62 +49,55 @@ fn generate_code(hasher: &mut impl Hasher, max_len: usize) -> String {
 
 /// Execute the code and terminate after either reading or writing a certain
 /// finite number of bytes. Returns the output bytes as a [`Vec<u8>`].
-fn result_with<'code, C: CellType, E: Executor<'code, C>>(code: &'code str, opt: u32) -> Vec<u8> {
+fn result_with<'code, C: CellType, E: Executor<'code, C>>(
+    code: &'code str,
+    opt: u32,
+) -> (bool, Vec<u8>) {
     let mut input = Vec::new();
     for i in 0..1024 {
         input.push((183 * i) as u8);
     }
-    let mut output = input.clone();
-    let mut context = Context::new(Some(Box::new(&input[..])), Some(Box::new(&mut output[..])));
+    let mut output = Vec::new();
+    let mut context = Context::new(Some(Box::new(&input[..])), Some(Box::new(&mut output)));
     let exec = E::create(code, opt).unwrap();
-    exec.execute(&mut context).unwrap();
+    let finished = exec.execute_limited(&mut context, 100_000).unwrap();
     drop(context);
-    return output;
+    return (finished, output);
+}
+
+/// Compare that the two execution results. Since the execution might have been
+/// interrupted at different times, this only checks the parts that are present
+/// in both, unless the programs finished.
+fn compare_results(a: &(bool, Vec<u8>), b: &(bool, Vec<u8>)) -> bool {
+    if a.0 && b.0 {
+        a.1 == b.1
+    } else {
+        if a.0 && a.1.len() < b.1.len() {
+            return false;
+        }
+        if b.0 && b.1.len() < a.1.len() {
+            return false;
+        }
+        for i in 0..a.1.len().min(b.1.len()) {
+            if a.1[i] != b.1[i] {
+                return false;
+            }
+        }
+        return true;
+    }
 }
 
 /// Check the code by executing it with different executors. Tests that the output
 /// of all the executors is identical.
 fn check_code<'code>(code: &'code str) -> bool {
     let inplace = result_with::<u8, InplaceInterpreter<'code, u8>>(code, 0);
-    let baseint_no_opt = result_with::<u8, BaseInterpreter<u8>>(code, 0);
-    if inplace != baseint_no_opt {
+    let irint = result_with::<u8, IrInterpreter<u8>>(code, 0);
+    if !compare_results(&inplace, &irint) {
         return false;
     }
-    let irint = result_with::<u8, BaseInterpreter<u8>>(code, 4);
-    if inplace != irint {
+    let bcint = result_with::<u8, BcInterpreter<u8>>(code, 4);
+    if !compare_results(&inplace, &bcint) || !compare_results(&irint, &bcint) {
         return false;
-    }
-    return true;
-}
-
-/// Code is "safe" if there is a finite amount of operations executed between
-/// each IO operation.
-fn is_safe(code: &str) -> bool {
-    let mut stack = vec![GenState::new(Some(0))];
-    for inst in code.chars() {
-        let state = stack.last_mut().unwrap();
-        match inst {
-            '+' => state.add(),
-            '-' => state.sub(),
-            '<' => state.left(),
-            '>' => state.right(),
-            ',' => state.input(),
-            '.' => state.output(),
-            ']' => {
-                if stack.len() > 1 {
-                    let prev_state = stack.pop().unwrap();
-                    let state = stack.last_mut().unwrap();
-                    if state.pop(prev_state) {
-                        return false;
-                    }
-                }
-            }
-            '[' => {
-                let new = state.push();
-                stack.push(new);
-            }
-            _ => { /* comment */ }
-        }
     }
     return true;
 }
@@ -313,7 +145,7 @@ fn minimize_code(hasher: &mut impl Hasher, code: String) -> String {
         } else {
             next = code[..i].to_owned() + &code[i + 1..];
         }
-        if is_safe(&next) && !check_code(&next) {
+        if !check_code(&next) {
             return minimize_code(hasher, next);
         }
     }

@@ -10,11 +10,11 @@ use super::Executor;
 ///
 /// # Examples
 /// ```
-/// # use hpbf::{Program, Block, Instr, Error, Context, Executor, InplaceInterpreter};
+/// # use hpbf::{ir::{Program, Block, Instr}, Error, runtime::Context, exec::{Executor, InplaceInterpreter}};
 /// # let mut buf = Vec::new();
 /// # let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
 /// # let code = "++++++[>+++++<-]>++[>++<-]++++[>++<-]>[.>]";
-/// let exec = InplaceInterpreter::<u8>::create(code, false, 1)?;
+/// let exec = InplaceInterpreter::<u8>::create(code, 1)?;
 /// exec.execute(&mut ctx)?;
 /// # drop(ctx);
 /// # assert_eq!(String::from_utf8(buf).unwrap(), "H");
@@ -25,52 +25,53 @@ pub struct InplaceInterpreter<'code, C: CellType> {
     _phantom: PhantomData<C>,
 }
 
-impl<'code, C: CellType> Executor<'code, C> for InplaceInterpreter<'code, C> {
-    fn create(code: &'code str, _opt: u32) -> Result<Self, Error> {
-        Ok(InplaceInterpreter {
-            code,
-            _phantom: PhantomData,
-        })
-    }
-
-    fn execute(&self, context: &mut Context<C>) -> Result<(), Error<'code>> {
+impl<'code, C: CellType> InplaceInterpreter<'code, C> {
+    /// Execute the brainfuck program in the given context.
+    fn execute_in(
+        &self,
+        cxt: &mut Context<C>,
+        mut limit: Option<usize>,
+    ) -> Result<bool, Error<'code>> {
         let code_bytes = self.code.as_bytes();
         let mut loop_stack = Vec::new();
         let mut pc = 0;
         while pc < code_bytes.len() {
+            if let Some(lim) = limit {
+                if lim == 0 {
+                    return Ok(false);
+                }
+                limit = Some(lim - 1);
+            }
             let code = code_bytes[pc];
             pc += 1;
             match code {
                 b'<' => {
-                    context.memory.mov(-1);
+                    cxt.memory.mov(-1);
                 }
                 b'>' => {
-                    context.memory.mov(1);
+                    cxt.memory.mov(1);
                 }
                 b'+' => {
-                    context
-                        .memory
-                        .write(0, context.memory.read(0).wrapping_add(C::ONE));
+                    cxt.memory.write(0, cxt.memory.read(0).wrapping_add(C::ONE));
                 }
                 b'-' => {
-                    context
-                        .memory
-                        .write(0, context.memory.read(0).wrapping_add(C::NEG_ONE));
+                    cxt.memory
+                        .write(0, cxt.memory.read(0).wrapping_add(C::NEG_ONE));
                 }
                 b'.' => {
-                    if let None = context.output(context.memory.read(0).into_u8()) {
-                        return Ok(());
+                    if let None = cxt.output(cxt.memory.read(0).into_u8()) {
+                        return Ok(true);
                     }
                 }
                 b',' => {
-                    if let Some(val) = context.input() {
-                        context.memory.write(0, C::from_u8(val));
+                    if let Some(val) = cxt.input() {
+                        cxt.memory.write(0, C::from_u8(val));
                     } else {
-                        return Ok(());
+                        return Ok(true);
                     }
                 }
                 b'[' => {
-                    if context.memory.read(0) == C::ZERO {
+                    if cxt.memory.read(0) == C::ZERO {
                         let mut cnt = 0;
                         while pc < code_bytes.len() {
                             if code_bytes[pc] == b']' {
@@ -94,7 +95,7 @@ impl<'code, C: CellType> Executor<'code, C> for InplaceInterpreter<'code, C> {
                         str: self.code,
                         position: pc - 1,
                     })?;
-                    if context.memory.read(0) != C::ZERO {
+                    if cxt.memory.read(0) != C::ZERO {
                         pc = target;
                         loop_stack.push(pc);
                     }
@@ -102,7 +103,28 @@ impl<'code, C: CellType> Executor<'code, C> for InplaceInterpreter<'code, C> {
                 _ => { /* ignore comments */ }
             }
         }
-        Ok(())
+        Ok(true)
+    }
+}
+
+impl<'code, C: CellType> Executor<'code, C> for InplaceInterpreter<'code, C> {
+    fn create(code: &'code str, _opt: u32) -> Result<Self, Error> {
+        Ok(InplaceInterpreter {
+            code,
+            _phantom: PhantomData,
+        })
+    }
+
+    fn execute(&self, context: &mut Context<C>) -> Result<(), Error<'code>> {
+        self.execute_in(context, None).map(|_| ())
+    }
+
+    fn execute_limited(
+        &self,
+        context: &mut Context<C>,
+        instr: usize,
+    ) -> Result<bool, Error<'code>> {
+        self.execute_in(context, Some(instr))
     }
 }
 
