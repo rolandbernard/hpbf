@@ -51,8 +51,8 @@ struct Analysis {
     has_shift: bool,
     writes: HashSet<isize>,
     sub_anal: Vec<Analysis>,
-    min_accessed: Option<isize>,
-    max_accessed: Option<isize>,
+    min_accessed: isize,
+    max_accessed: isize,
 }
 
 /// Live range information for the temporaries, used later on during temp allocation.
@@ -88,11 +88,11 @@ pub struct CodeGen<C: CellType> {
 impl Analysis {
     /// Record that the memory address `var` has been accessed.
     fn accessed(&mut self, var: isize) {
-        if self.min_accessed.is_none() || self.min_accessed.unwrap() > var {
-            self.min_accessed = Some(var);
+        if self.min_accessed > var {
+            self.min_accessed = var;
         }
-        if self.max_accessed.is_none() || self.max_accessed.unwrap() < var {
-            self.max_accessed = Some(var);
+        if self.max_accessed < var {
+            self.max_accessed = var;
         }
     }
 
@@ -111,8 +111,8 @@ impl Analysis {
             has_shift: false,
             writes: HashSet::new(),
             sub_anal: Vec::new(),
-            min_accessed: None,
-            max_accessed: None,
+            min_accessed: 0,
+            max_accessed: 0,
         };
         for inst in &block.insts {
             match inst {
@@ -129,12 +129,8 @@ impl Analysis {
                 ir::Instr::Loop { cond, block } | ir::Instr::If { cond, block } => {
                     anal.accessed(*cond);
                     let sub_analysis = Self::analyze(block);
-                    if let Some(min) = sub_analysis.min_accessed {
-                        anal.accessed(min);
-                    }
-                    if let Some(max) = sub_analysis.max_accessed {
-                        anal.accessed(max);
-                    }
+                    anal.accessed(sub_analysis.min_accessed);
+                    anal.accessed(sub_analysis.max_accessed);
                     if sub_analysis.has_shift {
                         anal.has_shift = true;
                         anal.writes = HashSet::new();
@@ -647,8 +643,8 @@ impl<C: CellType> CodeGen<C> {
     pub fn translate(program: &ir::Program<C>, num_regs: usize) -> Program<C> {
         let analysis = Analysis::analyze(program);
         let mut codegen = CodeGen {
-            min_accessed: analysis.min_accessed.unwrap_or(0),
-            max_accessed: analysis.max_accessed.unwrap_or(0),
+            min_accessed: analysis.min_accessed,
+            max_accessed: analysis.max_accessed,
             writes: HashMap::new(),
             ranges: Vec::new(),
             values: HashMap::new(),

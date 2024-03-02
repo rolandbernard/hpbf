@@ -42,6 +42,7 @@ pub struct BcInterpreter<C: CellType> {
 pub struct OpsContext<'cxt, C: CellType> {
     min_accessed: isize,
     max_accessed: isize,
+    budget: usize,
     context: Context<'cxt, C>,
     temps: [C; 0],
 }
@@ -70,7 +71,7 @@ impl<C: CellType> BcInterpreter<C> {
     /// Build the context required for the threaded code interpreter.
     fn build_context<'a>(&self, cxt: Context<'a, C>) -> *mut OpsContext<'a, C> {
         let layout = Layout::from_size_align(
-            mem::size_of::<OpsContext<C>>() + mem::size_of::<C>() * self.bytecode.temps,
+            mem::size_of::<OpsContext<C>>() + mem::size_of::<C>() * self.bytecode.temps.max(2),
             mem::align_of::<OpsContext<C>>(),
         )
         .unwrap();
@@ -86,7 +87,7 @@ impl<C: CellType> BcInterpreter<C> {
     /// Free the context and return the captured context.
     fn free_context<'a>(&self, cxt: *mut OpsContext<'a, C>) -> Context<'a, C> {
         let layout = Layout::from_size_align(
-            mem::size_of::<OpsContext<C>>() + mem::size_of::<C>() * self.bytecode.temps,
+            mem::size_of::<OpsContext<C>>() + mem::size_of::<C>() * self.bytecode.temps.max(2),
             mem::align_of::<OpsContext<C>>(),
         )
         .unwrap();
@@ -104,14 +105,9 @@ impl<C: CellType> BcInterpreter<C> {
         let ops_cxt = self.build_context(def_cxt);
         let code = self.build_threaded_code();
         let mut ip = code.as_ptr();
-        let mut r0 = C::ZERO;
-        let mut r1 = C::ZERO;
         while !ip.is_null() {
             // Safety: We rely on the threaded code being generated correctly.
-            unsafe {
-                let mem = (*ops_cxt).context.memory.current_ptr();
-                (ip, r0, r1) = enter_ops(ops_cxt, mem, ip, r0, r1);
-            }
+            unsafe { ip = enter_ops(ops_cxt, ip) };
         }
         let mut def_cxt = self.free_context(ops_cxt);
         mem::swap(cxt, &mut def_cxt);
@@ -191,12 +187,6 @@ impl<C: CellType> BcInterpreter<C> {
         }
         Some(true)
     }
-
-    /// Experimental.
-    pub fn execute_fast(&self, context: &mut Context<C>) -> Result<(), Error> {
-        self.execute_fast_in(context);
-        Ok(())
-    }
 }
 
 impl<'p, C: CellType> Executor<'p, C> for BcInterpreter<C> {
@@ -208,7 +198,7 @@ impl<'p, C: CellType> Executor<'p, C> for BcInterpreter<C> {
     }
 
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error<'p>> {
-        self.execute_in(context, None);
+        self.execute_fast_in(context);
         Ok(())
     }
 

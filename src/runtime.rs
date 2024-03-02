@@ -3,7 +3,7 @@
 use std::{
     alloc::{alloc_zeroed, dealloc, Layout},
     io::{stdin, stdout, Read, Write},
-    ptr,
+    mem, ptr,
 };
 
 use crate::CellType;
@@ -53,6 +53,12 @@ impl<C: CellType> Memory<C> {
         self.offset = self.offset.wrapping_add_signed(offset);
     }
 
+    /// Move the current pointer. No memory will be allocated.
+    pub fn set_current_ptr(&mut self, ptr: *mut C) {
+        self.offset = ((ptr as isize).wrapping_sub(self.buffer as isize)
+            / mem::size_of::<C>() as isize) as usize;
+    }
+
     /// Read from the given offset from the current pointer. Reading from
     /// outside the currently allocated memory buffer will not allocate new
     /// memory, but immediately return zero.
@@ -68,6 +74,7 @@ impl<C: CellType> Memory<C> {
 
     /// Make sure that subsequent calls to [`Self::read`] and [`Self::write`] will
     /// not cause a bounds check failure for offsets in the range `start..end`.
+    #[cold]
     pub fn make_accessible(&mut self, start: isize, end: isize) {
         let start_ptr = (self.offset as isize).wrapping_add(start);
         let end_ptr = (self.offset as isize).wrapping_add(end);
@@ -133,6 +140,11 @@ impl<C: CellType> Memory<C> {
     /// Test whether the given offset can be accessed without having to resize.
     pub fn check(&mut self, offset: isize) -> bool {
         self.offset.wrapping_add_signed(offset) < self.size
+    }
+
+    /// Test whether the given pointer can be accessed without having to resize.
+    pub fn check_ptr(&mut self, ptr: *mut C) -> bool {
+        ((ptr as usize).wrapping_sub(self.buffer as usize) / mem::size_of::<C>()) < self.size
     }
 }
 

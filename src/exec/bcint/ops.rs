@@ -7,14 +7,16 @@ use crate::{
 
 use super::OpsContext;
 
+/// The signature of the threaded code segments.
 type Op<C> = unsafe fn(
     cxt: *mut OpsContext<C>,
     mem: *mut C,
     ip: *const OpCode<C>,
     r0: C,
     r1: C,
-) -> (*const OpCode<C>, C, C);
+) -> *const OpCode<C>;
 
+/// An element in the instruction stream for the threaded code.
 pub union OpCode<C: CellType> {
     op: Op<C>,
     off: isize,
@@ -22,13 +24,18 @@ pub union OpCode<C: CellType> {
     val: C,
 }
 
+/// Trait for reading a value from some location in the virtual machine.
 trait OpRead<C: CellType> {
+    /// The number of instruction stream items consumed by a read.
     const SHIFT: usize;
 
+    /// Read the value and return it.
     unsafe fn read(cxt: *mut OpsContext<C>, mem: *mut C, ip: *const OpCode<C>, r0: C, r1: C) -> C;
 }
 
+/// Trait for writing a value to some location in the virtual machine.
 trait OpWrite<C: CellType>: OpRead<C> {
+    /// Write the given `value` and return the new state of the registers.
     unsafe fn write(
         cxt: *mut OpsContext<C>,
         mem: *mut C,
@@ -39,13 +46,27 @@ trait OpWrite<C: CellType>: OpRead<C> {
     ) -> (C, C);
 }
 
+/// Read/write from a memory location. The offset is passed in the instruction stream.
 struct Mem;
+
+/// Read/write from a temporary. The index is passed in the instruction stream.
 struct Tmp;
+
+/// Read an immediate value from the instruction stream.
 struct Imm;
+
+/// Read/write to the first register.
 struct Reg0;
+
+/// Read/write to the second register.
 struct Reg1;
 
+unsafe fn temps_ptr<C: CellType>(cxt: *mut OpsContext<C>) -> *mut C {
+    ptr::addr_of_mut!((*cxt).temps) as *mut _
+}
+
 impl<C: CellType> OpWrite<C> for Mem {
+    #[inline(always)]
     unsafe fn write(
         _cxt: *mut OpsContext<C>,
         mem: *mut C,
@@ -60,6 +81,7 @@ impl<C: CellType> OpWrite<C> for Mem {
 }
 
 impl<C: CellType> OpWrite<C> for Tmp {
+    #[inline(always)]
     unsafe fn write(
         cxt: *mut OpsContext<C>,
         _mem: *mut C,
@@ -68,12 +90,13 @@ impl<C: CellType> OpWrite<C> for Tmp {
         r1: C,
         value: C,
     ) -> (C, C) {
-        *(*cxt).temps.as_mut_ptr().add((*ip).idx) = value;
+        *temps_ptr(cxt).add((*ip).idx) = value;
         (r0, r1)
     }
 }
 
 impl<C: CellType> OpWrite<C> for Reg0 {
+    #[inline(always)]
     unsafe fn write(
         _cxt: *mut OpsContext<C>,
         _mem: *mut C,
@@ -87,6 +110,7 @@ impl<C: CellType> OpWrite<C> for Reg0 {
 }
 
 impl<C: CellType> OpWrite<C> for Reg1 {
+    #[inline(always)]
     unsafe fn write(
         _cxt: *mut OpsContext<C>,
         _mem: *mut C,
@@ -102,6 +126,7 @@ impl<C: CellType> OpWrite<C> for Reg1 {
 impl<C: CellType> OpRead<C> for Mem {
     const SHIFT: usize = 1;
 
+    #[inline(always)]
     unsafe fn read(
         _cxt: *mut OpsContext<C>,
         mem: *mut C,
@@ -116,6 +141,7 @@ impl<C: CellType> OpRead<C> for Mem {
 impl<C: CellType> OpRead<C> for Tmp {
     const SHIFT: usize = 1;
 
+    #[inline(always)]
     unsafe fn read(
         cxt: *mut OpsContext<C>,
         _mem: *mut C,
@@ -123,13 +149,14 @@ impl<C: CellType> OpRead<C> for Tmp {
         _r0: C,
         _r1: C,
     ) -> C {
-        *(*cxt).temps.as_mut_ptr().add((*ip).idx)
+        *temps_ptr(cxt).add((*ip).idx)
     }
 }
 
 impl<C: CellType> OpRead<C> for Imm {
     const SHIFT: usize = 1;
 
+    #[inline(always)]
     unsafe fn read(
         _cxt: *mut OpsContext<C>,
         _mem: *mut C,
@@ -144,6 +171,7 @@ impl<C: CellType> OpRead<C> for Imm {
 impl<C: CellType> OpRead<C> for Reg0 {
     const SHIFT: usize = 0;
 
+    #[inline(always)]
     unsafe fn read(
         _cxt: *mut OpsContext<C>,
         _mem: *mut C,
@@ -158,6 +186,7 @@ impl<C: CellType> OpRead<C> for Reg0 {
 impl<C: CellType> OpRead<C> for Reg1 {
     const SHIFT: usize = 0;
 
+    #[inline(always)]
     unsafe fn read(
         _cxt: *mut OpsContext<C>,
         _mem: *mut C,
@@ -169,305 +198,358 @@ impl<C: CellType> OpRead<C> for Reg1 {
     }
 }
 
+/// Noop instruction that does not change the virtual machine state. In debug mode,
+/// this operation return immediately with the address of the next instruction.
 #[cfg(debug_assertions)]
 unsafe fn noop<C: CellType>(
-    _cxt: *mut OpsContext<C>,
-    _mem: *mut C,
+    cxt: *mut OpsContext<C>,
+    mem: *mut C,
     ip: *const OpCode<C>,
     r0: C,
     r1: C,
-) -> (*const OpCode<C>, C, C) {
-    (ip.add(1), r0, r1)
+) -> *const OpCode<C> {
+    temps_ptr(cxt).add(0).write(r0);
+    temps_ptr(cxt).add(1).write(r1);
+    (*cxt).context.memory.set_current_ptr(mem);
+    ip.add(1)
 }
 
+/// Noop instruction that does not change the virtual machine state. In release mode,
+/// this operation will directly call the next instruction. This assumes that there
+/// will be tail call optimizations applied to avoid stack overflow.
 #[cfg(not(debug_assertions))]
+#[inline(always)]
 unsafe fn noop<C: CellType>(
     cxt: *mut OpsContext<C>,
     mem: *mut C,
     mut ip: *const OpCode<C>,
     r0: C,
     r1: C,
-) -> (*const OpCode<C>, C, C) {
+) -> *const OpCode<C> {
     ip = ip.add(1);
     ((*ip).op)(cxt, mem, ip, r0, r1)
 }
 
+/// Check that the given memory location does not need a resize. If a resize is
+/// needed, it is performed and the new memory pointer returned. This will only
+/// check the lower memory limit.
+#[inline(always)]
+unsafe fn checkl<C: CellType>(cxt: *mut OpsContext<C>, mem: *mut C) -> *mut C {
+    if !(*cxt)
+        .context
+        .memory
+        .check_ptr(mem.wrapping_offset((*cxt).min_accessed))
+    {
+        (*cxt).context.memory.set_current_ptr(mem);
+        (*cxt)
+            .context
+            .memory
+            .make_accessible((*cxt).min_accessed, (*cxt).max_accessed + 1);
+        (*cxt).context.memory.current_ptr()
+    } else {
+        mem
+    }
+}
+
+/// Check that the given memory location does not need a resize. If a resize is
+/// needed, it is performed and the new memory pointer returned. This will only
+/// check the upper memory limit.
+#[inline(always)]
+unsafe fn checkr<C: CellType>(cxt: *mut OpsContext<C>, mem: *mut C) -> *mut C {
+    if !(*cxt)
+        .context
+        .memory
+        .check_ptr(mem.wrapping_offset((*cxt).max_accessed))
+    {
+        (*cxt).context.memory.set_current_ptr(mem);
+        (*cxt)
+            .context
+            .memory
+            .make_accessible((*cxt).min_accessed, (*cxt).max_accessed + 1);
+        (*cxt).context.memory.current_ptr()
+    } else {
+        mem
+    }
+}
+
+/// Move the memory pointer to the left until the condition is false.
 unsafe fn scanl<C: CellType>(
     cxt: *mut OpsContext<C>,
     mut mem: *mut C,
     ip: *const OpCode<C>,
     r0: C,
     r1: C,
-) -> (*const OpCode<C>, C, C) {
+) -> *const OpCode<C> {
     let cond = (*ip.add(1)).off;
     let shift = (*ip.add(2)).off;
     while *mem.offset(cond) != C::ZERO {
-        (*cxt).context.memory.mov(shift);
-        if !(*cxt).context.memory.check((*cxt).min_accessed) {
-            (*cxt)
-                .context
-                .memory
-                .make_accessible((*cxt).min_accessed, (*cxt).max_accessed + 1);
-        }
-        mem = (*cxt).context.memory.current_ptr();
+        mem = checkl(cxt, mem.wrapping_offset(shift));
     }
     noop(cxt, mem, ip.add(2), r0, r1)
 }
 
+/// Move the memory pointer to the right until the condition is false.
 unsafe fn scanr<C: CellType>(
     cxt: *mut OpsContext<C>,
     mut mem: *mut C,
     ip: *const OpCode<C>,
     r0: C,
     r1: C,
-) -> (*const OpCode<C>, C, C) {
+) -> *const OpCode<C> {
     let cond = (*ip.add(1)).off;
     let shift = (*ip.add(2)).off;
     while *mem.offset(cond) != C::ZERO {
-        (*cxt).context.memory.mov(shift);
-        if !(*cxt).context.memory.check((*cxt).max_accessed) {
-            (*cxt)
-                .context
-                .memory
-                .make_accessible((*cxt).min_accessed, (*cxt).max_accessed + 1);
-        }
-        mem = (*cxt).context.memory.current_ptr();
+        mem = checkr(cxt, mem.wrapping_offset(shift));
     }
     noop(cxt, mem, ip.add(2), r0, r1)
 }
 
+/// Move the memory pointer to the left and perform bounds checks.
 unsafe fn movl<C: CellType>(
     cxt: *mut OpsContext<C>,
-    _mem: *mut C,
+    mut mem: *mut C,
     ip: *const OpCode<C>,
     r0: C,
     r1: C,
-) -> (*const OpCode<C>, C, C) {
+) -> *const OpCode<C> {
     let shift = (*ip.add(1)).off;
-    (*cxt).context.memory.mov(shift);
-    if !(*cxt).context.memory.check((*cxt).min_accessed) {
-        (*cxt)
-            .context
-            .memory
-            .make_accessible((*cxt).min_accessed, (*cxt).max_accessed + 1);
-    }
-    noop(cxt, (*cxt).context.memory.current_ptr(), ip.add(1), r0, r1)
+    mem = checkl(cxt, mem.wrapping_offset(shift));
+    noop(cxt, mem, ip.add(1), r0, r1)
 }
 
+/// Move the memory pointer to the right and perform bounds checks.
 unsafe fn movr<C: CellType>(
     cxt: *mut OpsContext<C>,
-    _mem: *mut C,
+    mut mem: *mut C,
     ip: *const OpCode<C>,
     r0: C,
     r1: C,
-) -> (*const OpCode<C>, C, C) {
+) -> *const OpCode<C> {
     let shift = (*ip.add(1)).off;
-    (*cxt).context.memory.mov(shift);
-    if !(*cxt).context.memory.check((*cxt).max_accessed) {
-        (*cxt)
-            .context
-            .memory
-            .make_accessible((*cxt).min_accessed, (*cxt).max_accessed + 1);
-    }
-    noop(cxt, (*cxt).context.memory.current_ptr(), ip.add(1), r0, r1)
+    mem = checkr(cxt, mem.wrapping_offset(shift));
+    noop(cxt, mem, ip.add(1), r0, r1)
 }
 
+/// Input from the input stream and save the value at a given memory location.
 unsafe fn input<C: CellType>(
     cxt: *mut OpsContext<C>,
     mem: *mut C,
     ip: *const OpCode<C>,
     r0: C,
     r1: C,
-) -> (*const OpCode<C>, C, C) {
-    let dst = (*ip.add(1)).off;
+) -> *const OpCode<C> {
     if let Some(inp) = (*cxt).context.input() {
         let val = C::from_u8(inp);
+        let dst = (*ip.add(1)).off;
         *mem.offset(dst) = val;
         noop(cxt, mem, ip.add(1), r0, r1)
     } else {
-        (ptr::null(), r0, r1)
+        ptr::null()
     }
 }
 
+/// Output the value at given memory location to the output stream.
 unsafe fn output<C: CellType>(
     cxt: *mut OpsContext<C>,
     mem: *mut C,
     ip: *const OpCode<C>,
     r0: C,
     r1: C,
-) -> (*const OpCode<C>, C, C) {
+) -> *const OpCode<C> {
     let src = (*ip.add(1)).off;
     let val = *mem.offset(src);
     if let Some(()) = (*cxt).context.output(val.into_u8()) {
         noop(cxt, mem, ip.add(1), r0, r1)
     } else {
-        (ptr::null(), r0, r1)
+        ptr::null()
     }
 }
 
+/// Branch if a given condition is zero. Instead of running the next instruction
+/// move the instruction pointer by an offset given in the instruction stream.
 unsafe fn brz<C: CellType>(
     cxt: *mut OpsContext<C>,
     mem: *mut C,
     ip: *const OpCode<C>,
     r0: C,
     r1: C,
-) -> (*const OpCode<C>, C, C) {
+) -> *const OpCode<C> {
     let cond = (*ip.add(1)).off;
-    let off = (*ip.add(2)).off;
     if *mem.offset(cond) == C::ZERO {
+        let off = (*ip.add(2)).off;
         noop(cxt, mem, ip.offset(off - 1), r0, r1)
     } else {
         noop(cxt, mem, ip.add(2), r0, r1)
     }
 }
 
+/// Branch if a given condition is not zero. Instead of running the next instruction
+/// move the instruction pointer by an offset given in the instruction stream.
 unsafe fn brnz<C: CellType>(
     cxt: *mut OpsContext<C>,
     mem: *mut C,
     ip: *const OpCode<C>,
     r0: C,
     r1: C,
-) -> (*const OpCode<C>, C, C) {
+) -> *const OpCode<C> {
     let cond = (*ip.add(1)).off;
-    let off = (*ip.add(2)).off;
     if *mem.offset(cond) != C::ZERO {
+        let off = (*ip.add(2)).off;
         noop(cxt, mem, ip.offset(off - 1), r0, r1)
     } else {
         noop(cxt, mem, ip.add(2), r0, r1)
     }
 }
 
+/// Store the result of adding `Dst` and `Src` into `Dst`.
 unsafe fn add<C: CellType, Dst: OpWrite<C>, Src: OpRead<C>>(
     cxt: *mut OpsContext<C>,
     mem: *mut C,
     mut ip: *const OpCode<C>,
-    r0: C,
-    r1: C,
-) -> (*const OpCode<C>, C, C) {
+    mut r0: C,
+    mut r1: C,
+) -> *const OpCode<C> {
     ip = ip.add(Src::SHIFT);
     let val0 = Src::read(cxt, mem, ip, r0, r1);
     ip = ip.add(Dst::SHIFT);
     let val1 = Dst::read(cxt, mem, ip, r0, r1);
-    Dst::write(cxt, mem, ip, r0, r1, val0.wrapping_add(val1));
+    (r0, r1) = Dst::write(cxt, mem, ip, r0, r1, val0.wrapping_add(val1));
     noop(cxt, mem, ip, r0, r1)
 }
 
+/// Store the result of adding `Src0` and `Src1` into `Dst`.
 unsafe fn add2<C: CellType, Dst: OpWrite<C>, Src0: OpRead<C>, Src1: OpRead<C>>(
     cxt: *mut OpsContext<C>,
     mem: *mut C,
     mut ip: *const OpCode<C>,
-    r0: C,
-    r1: C,
-) -> (*const OpCode<C>, C, C) {
+    mut r0: C,
+    mut r1: C,
+) -> *const OpCode<C> {
     ip = ip.add(Src0::SHIFT);
     let val0 = Src0::read(cxt, mem, ip, r0, r1);
     ip = ip.add(Src1::SHIFT);
     let val1 = Src1::read(cxt, mem, ip, r0, r1);
     ip = ip.add(Dst::SHIFT);
-    Dst::write(cxt, mem, ip, r0, r1, val0.wrapping_add(val1));
+    (r0, r1) = Dst::write(cxt, mem, ip, r0, r1, val0.wrapping_add(val1));
     noop(cxt, mem, ip, r0, r1)
 }
 
+/// Store the result of subtracting `Src` from `Dst` into `Dst`.
 unsafe fn sub<C: CellType, Dst: OpWrite<C>, Src: OpRead<C>>(
     cxt: *mut OpsContext<C>,
     mem: *mut C,
     mut ip: *const OpCode<C>,
-    r0: C,
-    r1: C,
-) -> (*const OpCode<C>, C, C) {
+    mut r0: C,
+    mut r1: C,
+) -> *const OpCode<C> {
     ip = ip.add(Src::SHIFT);
     let val0 = Src::read(cxt, mem, ip, r0, r1);
     ip = ip.add(Dst::SHIFT);
     let val1 = Dst::read(cxt, mem, ip, r0, r1);
-    Dst::write(cxt, mem, ip, r0, r1, val1.wrapping_add(val0.wrapping_neg()));
+    (r0, r1) = Dst::write(cxt, mem, ip, r0, r1, val1.wrapping_add(val0.wrapping_neg()));
     noop(cxt, mem, ip, r0, r1)
 }
 
+/// Store the result of subtracting `Src1` from `Src0` into `Dst`.
 unsafe fn sub2<C: CellType, Dst: OpWrite<C>, Src0: OpRead<C>, Src1: OpRead<C>>(
     cxt: *mut OpsContext<C>,
     mem: *mut C,
     mut ip: *const OpCode<C>,
-    r0: C,
-    r1: C,
-) -> (*const OpCode<C>, C, C) {
+    mut r0: C,
+    mut r1: C,
+) -> *const OpCode<C> {
     ip = ip.add(Src0::SHIFT);
     let val0 = Src0::read(cxt, mem, ip, r0, r1);
     ip = ip.add(Src1::SHIFT);
     let val1 = Src1::read(cxt, mem, ip, r0, r1);
     ip = ip.add(Dst::SHIFT);
-    Dst::write(cxt, mem, ip, r0, r1, val0.wrapping_add(val1.wrapping_neg()));
+    (r0, r1) = Dst::write(cxt, mem, ip, r0, r1, val0.wrapping_add(val1.wrapping_neg()));
     noop(cxt, mem, ip, r0, r1)
 }
 
+/// Store the result of multiplying `Dst` and `Src` into `Dst`.
 unsafe fn mul<C: CellType, Dst: OpWrite<C>, Src: OpRead<C>>(
     cxt: *mut OpsContext<C>,
     mem: *mut C,
     mut ip: *const OpCode<C>,
-    r0: C,
-    r1: C,
-) -> (*const OpCode<C>, C, C) {
+    mut r0: C,
+    mut r1: C,
+) -> *const OpCode<C> {
     ip = ip.add(Src::SHIFT);
     let val0 = Src::read(cxt, mem, ip, r0, r1);
     ip = ip.add(Dst::SHIFT);
     let val1 = Dst::read(cxt, mem, ip, r0, r1);
-    Dst::write(cxt, mem, ip, r0, r1, val0.wrapping_mul(val1));
+    (r0, r1) = Dst::write(cxt, mem, ip, r0, r1, val0.wrapping_mul(val1));
     noop(cxt, mem, ip, r0, r1)
 }
 
+/// Store the result of multiplying `Src0` and `Src1` into `Dst`.
 unsafe fn mul2<C: CellType, Dst: OpWrite<C>, Src0: OpRead<C>, Src1: OpRead<C>>(
     cxt: *mut OpsContext<C>,
     mem: *mut C,
     mut ip: *const OpCode<C>,
-    r0: C,
-    r1: C,
-) -> (*const OpCode<C>, C, C) {
+    mut r0: C,
+    mut r1: C,
+) -> *const OpCode<C> {
     ip = ip.add(Src0::SHIFT);
     let val0 = Src0::read(cxt, mem, ip, r0, r1);
     ip = ip.add(Src1::SHIFT);
     let val1 = Src1::read(cxt, mem, ip, r0, r1);
     ip = ip.add(Dst::SHIFT);
-    Dst::write(cxt, mem, ip, r0, r1, val0.wrapping_mul(val1));
+    (r0, r1) = Dst::write(cxt, mem, ip, r0, r1, val0.wrapping_mul(val1));
     noop(cxt, mem, ip, r0, r1)
 }
 
+/// Store the value of `Src` into `Dst`.
 unsafe fn copy<C: CellType, Dst: OpWrite<C>, Src: OpRead<C>>(
     cxt: *mut OpsContext<C>,
     mem: *mut C,
     mut ip: *const OpCode<C>,
-    r0: C,
-    r1: C,
-) -> (*const OpCode<C>, C, C) {
+    mut r0: C,
+    mut r1: C,
+) -> *const OpCode<C> {
     ip = ip.add(Src::SHIFT);
     let val = Src::read(cxt, mem, ip, r0, r1);
     ip = ip.add(Dst::SHIFT);
-    Dst::write(cxt, mem, ip, r0, r1, val);
+    (r0, r1) = Dst::write(cxt, mem, ip, r0, r1, val);
     noop(cxt, mem, ip, r0, r1)
 }
 
+/// immediately return the program. This returns a null pointer to indicate the
+/// end of the program, as opposed to returning an instruction pointer to continue at.
 unsafe fn ret<C: CellType>(
     _cxt: *mut OpsContext<C>,
     _mem: *mut C,
     _ip: *const OpCode<C>,
-    r0: C,
-    r1: C,
-) -> (*const OpCode<C>, C, C) {
-    (ptr::null(), r0, r1)
+    _r0: C,
+    _r1: C,
+) -> *const OpCode<C> {
+    ptr::null()
 }
 
+/// Enter the virtual machine with the given instruction stream pointer and context.
+///
+/// # Safety
+/// Calling this function with invalid instruction stream or context pointer will
+/// cause undefined behavior. This means, e.g., all branch targets must point to
+/// valid instructions, all instructions except [`ret`] must be followed by another
+/// valid instruction, all memory accessed must be withing the bounds indicated in
+/// `cxt`, all temporary accesses must be withing the allocation of `cxt`, etc.
 pub unsafe fn enter_ops<C: CellType>(
     cxt: *mut OpsContext<C>,
-    _mem: *mut C,
     ip: *const OpCode<C>,
-    r0: C,
-    r1: C,
-) -> (*const OpCode<C>, C, C) {
+) -> *const OpCode<C> {
     (*cxt)
         .context
         .memory
         .make_accessible((*cxt).min_accessed, (*cxt).max_accessed + 1);
-    ((*ip).op)(cxt, (*cxt).context.memory.current_ptr(), ip, r0, r1)
+    let r0 = *temps_ptr(cxt).add(0);
+    let r1 = *temps_ptr(cxt).add(1);
+    let mem = (*cxt).context.memory.current_ptr();
+    ((*ip).op)(cxt, mem, ip, r0, r1)
 }
 
+/// Emit a return instruction into `insts`.
 pub fn emit_return<C: CellType>(insts: &mut Vec<OpCode<C>>) {
     insts.push(OpCode { op: ret });
 }
@@ -555,6 +637,7 @@ macro_rules! op_match {
     );
 }
 
+/// Emit a bytecode instruction into `insts`.
 pub fn emit<C: CellType>(insts: &mut Vec<OpCode<C>>, instr: Instr<C>) {
     op_match!(insts, instr, Instr::Copy, copy, r);
     op_match!(insts, instr, Instr::Add, add, r w);
@@ -592,20 +675,23 @@ pub fn emit<C: CellType>(insts: &mut Vec<OpCode<C>>, instr: Instr<C>) {
             insts.push(OpCode { op: output });
             insts.push(OpCode { off: src });
         }
-        Instr::BrZ(cond, off) => {
+        Instr::BrZ(cond, _) => {
             insts.push(OpCode { op: brz });
             insts.push(OpCode { off: cond });
-            insts.push(OpCode { off });
+            insts.push(OpCode { off: 0 });
         }
-        Instr::BrNZ(cond, off) => {
+        Instr::BrNZ(cond, _) => {
             insts.push(OpCode { op: brnz });
             insts.push(OpCode { off: cond });
-            insts.push(OpCode { off });
+            insts.push(OpCode { off: 0 });
         }
         _ => unimplemented!("bytecode instruction `{instr:?}`"),
     }
 }
 
+/// Adjust a target of a branch. Note that doing this for a non-branch location
+/// or specifying an offset to an invalid location, will make a later call to
+/// [`enter_ops`] undefined behavior.
 pub fn adjust_branch<C: CellType>(branch_instr: &mut [OpCode<C>], offset: isize) {
     branch_instr[2].off = offset;
 }
