@@ -60,7 +60,7 @@ impl<C: CellType> Memory<C> {
         let ptr = self.offset.wrapping_add_signed(offset);
         if ptr < self.size {
             // Safety: The area from `memory` can safely be accessed up to `size`.
-            unsafe { self.buffer.add(ptr).read() }
+            unsafe { *self.buffer.add(ptr) }
         } else {
             C::ZERO
         }
@@ -115,7 +115,7 @@ impl<C: CellType> Memory<C> {
         self.make_accessible(offset, offset + 1);
         let ptr = self.offset.wrapping_add_signed(offset);
         // Safety: `make_accessible` ensures that `ptr` can be written safely.
-        unsafe { self.buffer.add(ptr).write(value) }
+        unsafe { *self.buffer.add(ptr) = value };
     }
 
     /// Write to the given offset from the current pointer. If the currently
@@ -124,10 +124,15 @@ impl<C: CellType> Memory<C> {
         let ptr = self.offset.wrapping_add_signed(offset);
         if ptr < self.size {
             // Safety: The area from `memory` can safely be accessed up to `size`.
-            unsafe { self.buffer.add(ptr).write(value) }
+            unsafe { *self.buffer.add(ptr) = value };
         } else {
             self.write_out_of_bounds(offset, value);
         }
+    }
+
+    /// Test whether the given offset can be accessed without having to resize.
+    pub fn check(&mut self, offset: isize) -> bool {
+        self.offset.wrapping_add_signed(offset) < self.size
     }
 }
 

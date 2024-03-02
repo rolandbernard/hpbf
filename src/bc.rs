@@ -576,8 +576,14 @@ impl<C: CellType> CodeGen<C> {
         for i in (0..self.insts.len()).rev() {
             match &mut self.insts[i] {
                 Instr::Add(dst, src0, src1) | Instr::Mul(dst, src0, src1) => {
-                    if matches!(src0, Loc::Tmp(_)) {
-                        mem::swap(src0, src1);
+                    if let Loc::Tmp(tmp0) = src0 {
+                        if let Loc::Tmp(tmp1) = src1 {
+                            if tmp1 < tmp0 {
+                                mem::swap(src0, src1);
+                            }
+                        } else {
+                            mem::swap(src0, src1);
+                        }
                     }
                     if matches!(src0, Loc::Imm(_)) {
                         mem::swap(src0, src1);
@@ -671,6 +677,24 @@ impl<C: CellType> Debug for Loc<C> {
             Loc::Mem(var) => write!(f, "[{var}]"),
             Loc::Tmp(tmp) => write!(f, "%{tmp}"),
             Loc::Imm(imm) => write!(f, "{imm:?}"),
+        }
+    }
+}
+
+impl<C: CellType> Debug for Instr<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Instr::Noop => write!(f, "noop"),
+            Instr::Scan(cond, shift) => write!(f, "scan [{cond}], {shift}"),
+            Instr::Mov(shift) => write!(f, "mov {shift}"),
+            Instr::Inp(dst) => write!(f, "inp [{dst}]"),
+            Instr::Out(src) => write!(f, "out [{src}]"),
+            Instr::BrZ(cond, off) => write!(f, "brz [{cond}], {off}"),
+            Instr::BrNZ(cond, off) => write!(f, "brnz [{cond}], {off}"),
+            Instr::Add(dst, src0, src1) => write!(f, "add {dst:?}, {src0:?}, {src1:?}"),
+            Instr::Sub(dst, src0, src1) => write!(f, "sub {dst:?}, {src0:?}, {src1:?}"),
+            Instr::Mul(dst, src0, src1) => write!(f, "mul {dst:?}, {src0:?}, {src1:?}"),
+            Instr::Copy(dst, src) => write!(f, "copy {dst:?}, {src:?}"),
         }
     }
 }

@@ -273,6 +273,11 @@ macro_rules! same_as_inplace_tests {
                 ",[-<+>],<+.",
                 temp_overwritten_by_input
             );
+            same_as_inplace_test!(
+                $i,
+                "-<<<+>>>[<<<<<<[>>+<<-]>>>[<<<+>>>-]<[>+<-]<.>>]",
+                must_not_delay_if_params_are_written
+            );
 
             // Manually created test cases.
             same_as_inplace_test_no_miri!(
