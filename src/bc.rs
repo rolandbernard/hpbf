@@ -417,7 +417,7 @@ impl<C: CellType> CodeGen<C> {
             free_regs.push(Reverse(i));
         }
         let mut free_temps = BinaryHeap::new();
-        let mut replacements = HashMap::new();
+        let mut replacements = HashMap::<usize, (Loc<C>, usize)>::new();
         for i in 0..self.insts.len() {
             match self.insts[i] {
                 Instr::Add(dst, src0, src1)
@@ -432,6 +432,10 @@ impl<C: CellType> CodeGen<C> {
                                     && !self.has_write_in_range(mem, first_use + 1, last_use)
                                     && [src0, src1].into_iter().all(|src| {
                                         !matches!(src, Loc::Mem(m) if self.has_write_in_range(m, i, first_use))
+                                        && !matches!(src, Loc::Tmp(tmp) if matches!(
+                                            replacements.get(&tmp).unwrap().0,
+                                            Loc::Mem(m) if self.has_write_in_range(m, i, first_use)
+                                        ))
                                     })
                                 {
                                     if num_uses - 1 != 0 {
