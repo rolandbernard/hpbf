@@ -515,7 +515,7 @@ unsafe fn copy<C: CellType, Dst: OpWrite<C>, Src: OpRead<C>>(
     noop(cxt, mem, ip, r0, r1)
 }
 
-/// immediately return the program. This returns a null pointer to indicate the
+/// Immediately return the program. This returns a null pointer to indicate the
 /// end of the program, as opposed to returning an instruction pointer to continue at.
 unsafe fn ret<C: CellType>(
     _cxt: *mut OpsContext<C>,
@@ -525,6 +525,27 @@ unsafe fn ret<C: CellType>(
     _r1: C,
 ) -> *const OpCode<C> {
     ptr::null()
+}
+
+/// Check whether there is enough budget left to continue. If not, return.
+unsafe fn limit<C: CellType>(
+    cxt: *mut OpsContext<C>,
+    mem: *mut C,
+    ip: *const OpCode<C>,
+    r0: C,
+    r1: C,
+) -> *const OpCode<C> {
+    let cost = (*ip.add(1)).idx;
+    if (*cxt).budget <= cost {
+        (*cxt).budget = 0;
+        temps_ptr(cxt).add(0).write(r0);
+        temps_ptr(cxt).add(1).write(r1);
+        (*cxt).context.memory.set_current_ptr(mem);
+        ip.add(2)
+    } else {
+        (*cxt).budget -= cost;
+        noop(cxt, mem, ip.add(1), r0, r1)
+    }
 }
 
 /// Enter the virtual machine with the given instruction stream pointer and context.
@@ -547,6 +568,12 @@ pub unsafe fn enter_ops<C: CellType>(
     let r1 = *temps_ptr(cxt).add(1);
     let mem = (*cxt).context.memory.current_ptr();
     ((*ip).op)(cxt, mem, ip, r0, r1)
+}
+
+/// Emit a budget check instruction into `insts`.
+pub fn emit_limit<C: CellType>(insts: &mut Vec<OpCode<C>>, cost: usize) {
+    insts.push(OpCode { op: limit });
+    insts.push(OpCode { idx: cost });
 }
 
 /// Emit a return instruction into `insts`.

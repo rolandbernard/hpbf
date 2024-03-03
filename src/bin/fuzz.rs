@@ -95,6 +95,14 @@ fn check_code<'code>(code: &'code str) -> bool {
     if !compare_results(&inplace, &irint) {
         return false;
     }
+    let bcint = result_with::<u8, BcInterpreter<u8>>(code, 0);
+    if !compare_results(&inplace, &bcint) || !compare_results(&irint, &bcint) {
+        return false;
+    }
+    let bcint = result_with::<u8, BcInterpreter<u8>>(code, 1);
+    if !compare_results(&inplace, &bcint) || !compare_results(&irint, &bcint) {
+        return false;
+    }
     let bcint = result_with::<u8, BcInterpreter<u8>>(code, 4);
     if !compare_results(&inplace, &bcint) || !compare_results(&irint, &bcint) {
         return false;

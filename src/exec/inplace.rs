@@ -4,13 +4,13 @@ use std::marker::PhantomData;
 
 use crate::{runtime::Context, CellType, Error, ErrorKind};
 
-use super::Executor;
+use super::{Executable, Executor};
 
 /// An inplace non-optimizing interpreter.
 ///
 /// # Examples
 /// ```
-/// # use hpbf::{ir::{Program, Block, Instr}, Error, runtime::Context, exec::{Executor, InplaceInterpreter}};
+/// # use hpbf::{ir::{Program, Block, Instr}, Error, runtime::Context, exec::{Executor, Executable, InplaceInterpreter}};
 /// # let mut buf = Vec::new();
 /// # let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
 /// # let code = "++++++[>+++++<-]>++[>++<-]++++[>++<-]>[.>]";
@@ -114,7 +114,9 @@ impl<'code, C: CellType> Executor<'code, C> for InplaceInterpreter<'code, C> {
             _phantom: PhantomData,
         })
     }
+}
 
+impl<'code, C: CellType> Executable<'code, C> for InplaceInterpreter<'code, C> {
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error<'code>> {
         self.execute_in(context, None).map(|_| ())
     }

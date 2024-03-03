@@ -6,14 +6,14 @@ use crate::{
     CellType, Error,
 };
 
-use super::Executor;
+use super::{Executable, Executor};
 
 /// A basic interpreter that does some limited optimizing transformations of the
 /// program and executes the result using a loop-and-switch interpreter.
 ///
 /// # Examples
 /// ```
-/// # use hpbf::{ir::{Program, Block, Instr}, Error, runtime::Context, exec::{Executor, IrInterpreter}};
+/// # use hpbf::{ir::{Program, Block, Instr}, Error, runtime::Context, exec::{Executor, Executable, IrInterpreter}};
 /// # let mut buf = Vec::new();
 /// # let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
 /// # let code = "++++++[>+++++<-]>++[>++<-]++++[>++<-]>[.>]";
@@ -97,7 +97,9 @@ impl<'p, C: CellType> Executor<'p, C> for IrInterpreter<C> {
         program = program.optimize(opt);
         Ok(IrInterpreter { program })
     }
+}
 
+impl<'p, C: CellType> Executable<'p, C> for IrInterpreter<C> {
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error<'p>> {
         self.execute_block(context, &self.program, &mut None);
         Ok(())

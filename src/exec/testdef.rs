@@ -2,7 +2,7 @@ macro_rules! executor_tests {
     ($i:ident) => {
         #[cfg(test)]
         mod tests {
-            use crate::{exec::{Executor, $i}, runtime::Context, Error};
+            use crate::{exec::{Executor, Executable, $i}, runtime::Context, Error};
 
             #[test]
             fn simple_execution() -> Result<(), Error<'static>> {
@@ -179,7 +179,7 @@ macro_rules! same_as_inplace_tests {
     ($i:ident) => {
         #[cfg(test)]
         mod tests_same_as_inplace {
-            use crate::{exec::{Executor, InplaceInterpreter, $i}, runtime::Context, Error};
+            use crate::{exec::{Executor, Executable, InplaceInterpreter, $i}, runtime::Context, Error};
 
             // Test cases that have previously caused issues found using fuzzing.
             same_as_inplace_test!($i, "<+[-..+]", infinite_loop_with_canceling_cond);

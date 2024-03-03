@@ -6,15 +6,15 @@ use std::{
 };
 
 use crate::{
-    bc::{self, Instr, Loc, Program},
+    bc::{self, Instr, Program},
     ir,
     runtime::Context,
     CellType, Error,
 };
 
-use self::ops::{adjust_branch, emit, emit_return, enter_ops, OpCode};
+use self::ops::{adjust_branch, emit, emit_limit, emit_return, enter_ops, OpCode};
 
-use super::Executor;
+use super::{Executable, Executor};
 
 mod ops;
 
@@ -23,7 +23,7 @@ mod ops;
 ///
 /// # Examples
 /// ```
-/// # use hpbf::{ir::{Program, Block, Instr}, Error, runtime::Context, exec::{Executor, BcInterpreter}};
+/// # use hpbf::{ir::{Program, Block, Instr}, Error, runtime::Context, exec::{Executor, Executable, BcInterpreter}};
 /// # let mut buf = Vec::new();
 /// # let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
 /// # let code = "++++++[>+++++<-]>++[>++<-]++++[>++<-]>[.>]";
@@ -49,19 +49,35 @@ pub struct OpsContext<'cxt, C: CellType> {
 
 impl<C: CellType> BcInterpreter<C> {
     /// Generate, from the bytecode, the corresponding threaded code.
-    fn build_threaded_code(&self) -> Vec<OpCode<C>> {
+    fn build_threaded_code(&self, limited: bool) -> Vec<OpCode<C>> {
+        let mut cost = 0;
         let mut inst_offset = Vec::with_capacity(self.bytecode.insts.len() + 1);
-        inst_offset.push(0);
+        let mut inst_start = Vec::with_capacity(self.bytecode.insts.len() + 1);
         let mut insts = Vec::new();
         for &inst in &self.bytecode.insts {
-            emit(&mut insts, inst);
+            cost += 1;
+            inst_start.push(insts.len());
+            if limited {
+                if let Instr::BrZ(_, _) | Instr::BrNZ(_, _) = inst {
+                    emit_limit(&mut insts, cost);
+                    cost = 0;
+                }
+                if let Instr::Scan(_, shift) = inst {
+                    if shift == 0 {
+                        emit_limit(&mut insts, usize::MAX);
+                    }
+                }
+            }
             inst_offset.push(insts.len());
+            emit(&mut insts, inst);
         }
+        inst_start.push(insts.len());
+        inst_offset.push(insts.len());
         emit_return(&mut insts);
         for (i, &inst) in self.bytecode.insts.iter().enumerate() {
             if let Instr::BrZ(_, off) | Instr::BrNZ(_, off) = inst {
                 let offset =
-                    inst_offset[i.wrapping_add_signed(off)] as isize - inst_offset[i] as isize;
+                    inst_start[i.wrapping_add_signed(off)] as isize - inst_offset[i] as isize;
                 adjust_branch(&mut insts[inst_offset[i]..], offset);
             }
         }
@@ -69,7 +85,7 @@ impl<C: CellType> BcInterpreter<C> {
     }
 
     /// Build the context required for the threaded code interpreter.
-    fn build_context<'a>(&self, cxt: Context<'a, C>) -> *mut OpsContext<'a, C> {
+    fn build_context<'a>(&self, cxt: Context<'a, C>, budget: usize) -> *mut OpsContext<'a, C> {
         let layout = Layout::from_size_align(
             mem::size_of::<OpsContext<C>>() + mem::size_of::<C>() * self.bytecode.temps.max(2),
             mem::align_of::<OpsContext<C>>(),
@@ -79,6 +95,7 @@ impl<C: CellType> BcInterpreter<C> {
             let ptr = alloc_zeroed(layout) as *mut OpsContext<C>;
             ptr::addr_of_mut!((*ptr).min_accessed).write(self.bytecode.min_accessed);
             ptr::addr_of_mut!((*ptr).max_accessed).write(self.bytecode.max_accessed);
+            ptr::addr_of_mut!((*ptr).budget).write(budget);
             ptr::addr_of_mut!((*ptr).context).write(cxt);
             ptr
         }
@@ -99,11 +116,11 @@ impl<C: CellType> BcInterpreter<C> {
     }
 
     /// Execute in the given context using the threaded code interpreter.
-    fn execute_fast_in(&self, cxt: &mut Context<C>) {
+    fn execute_in(&self, cxt: &mut Context<C>) {
         let mut def_cxt = Context::without_io();
         mem::swap(cxt, &mut def_cxt);
-        let ops_cxt = self.build_context(def_cxt);
-        let code = self.build_threaded_code();
+        let ops_cxt = self.build_context(def_cxt, 0);
+        let code = self.build_threaded_code(false);
         let mut ip = code.as_ptr();
         while !ip.is_null() {
             // Safety: We rely on the threaded code being generated correctly.
@@ -112,80 +129,28 @@ impl<C: CellType> BcInterpreter<C> {
         let mut def_cxt = self.free_context(ops_cxt);
         mem::swap(cxt, &mut def_cxt);
     }
-}
 
-impl<C: CellType> BcInterpreter<C> {
-    /// Execute the bytecode program in the given context.
-    fn execute_in(&self, cxt: &mut Context<C>, mut limit: Option<usize>) -> Option<bool> {
-        #[inline]
-        fn read<C: CellType>(cxt: &Context<C>, tmps: &[C], loc: Loc<C>) -> C {
-            match loc {
-                Loc::Mem(mem) => cxt.memory.read(mem),
-                Loc::Tmp(tmp) => tmps[tmp],
-                Loc::Imm(imm) => imm,
+    /// Execute in the given context using the threaded code interpreter.
+    fn execute_limited_in(&self, cxt: &mut Context<C>, budget: usize) -> bool {
+        let mut def_cxt = Context::without_io();
+        mem::swap(cxt, &mut def_cxt);
+        let ops_cxt = self.build_context(def_cxt, budget);
+        let code = self.build_threaded_code(true);
+        let mut finished = true;
+        let mut ip = code.as_ptr();
+        while !ip.is_null() {
+            // Safety: We rely on the threaded code being generated correctly.
+            unsafe {
+                if (*ops_cxt).budget == 0 {
+                    finished = false;
+                    break;
+                }
+                ip = enter_ops(ops_cxt, ip);
             }
         }
-        #[inline]
-        fn write<C: CellType>(cxt: &mut Context<C>, tmps: &mut [C], loc: Loc<C>, val: C) {
-            match loc {
-                Loc::Mem(mem) => cxt.memory.write(mem, val),
-                Loc::Tmp(tmp) => tmps[tmp] = val,
-                Loc::Imm(_) => unreachable!(),
-            }
-        }
-        let mut temps = vec![C::ZERO; self.bytecode.temps];
-        let mut ip = 0;
-        while let Some(instr) = self.bytecode.insts.get(ip) {
-            if let Some(lim) = limit {
-                if lim == 0 {
-                    return Some(false);
-                }
-                limit = Some(lim - 1);
-            }
-            match *instr {
-                Instr::Noop => { /* Do nothing. */ }
-                Instr::Scan(cond, shift) => {
-                    while cxt.memory.read(cond) != C::ZERO {
-                        cxt.memory.mov(shift);
-                    }
-                }
-                Instr::Mov(shift) => cxt.memory.mov(shift),
-                Instr::Inp(dst) => {
-                    let value = C::from_u8(cxt.input()?);
-                    cxt.memory.write(dst, value)
-                }
-                Instr::Out(src) => cxt.output(cxt.memory.read(src).into_u8())?,
-                Instr::BrZ(cond, off) => {
-                    if cxt.memory.read(cond) == C::ZERO {
-                        ip = ip.wrapping_add_signed(off - 1);
-                    }
-                }
-                Instr::BrNZ(cond, off) => {
-                    if cxt.memory.read(cond) != C::ZERO {
-                        ip = ip.wrapping_add_signed(off - 1);
-                    }
-                }
-                Instr::Add(dst, src0, src1) => {
-                    let result = read(cxt, &temps, src0).wrapping_add(read(cxt, &temps, src1));
-                    write(cxt, &mut temps, dst, result);
-                }
-                Instr::Sub(dst, src0, src1) => {
-                    let result = read(cxt, &temps, src0)
-                        .wrapping_add(read(cxt, &temps, src1).wrapping_neg());
-                    write(cxt, &mut temps, dst, result);
-                }
-                Instr::Mul(dst, src0, src1) => {
-                    let result = read(cxt, &temps, src0).wrapping_mul(read(cxt, &temps, src1));
-                    write(cxt, &mut temps, dst, result);
-                }
-                Instr::Copy(dst, src) => {
-                    let result = read(cxt, &temps, src);
-                    write(cxt, &mut temps, dst, result);
-                }
-            }
-            ip += 1;
-        }
-        Some(true)
+        let mut def_cxt = self.free_context(ops_cxt);
+        mem::swap(cxt, &mut def_cxt);
+        return finished;
     }
 }
 
@@ -196,14 +161,16 @@ impl<'p, C: CellType> Executor<'p, C> for BcInterpreter<C> {
         let bytecode = bc::CodeGen::translate(&program, 2);
         Ok(BcInterpreter { bytecode })
     }
+}
 
+impl<'p, C: CellType> Executable<'p, C> for BcInterpreter<C> {
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error<'p>> {
-        self.execute_fast_in(context);
+        self.execute_in(context);
         Ok(())
     }
 
     fn execute_limited(&self, context: &mut Context<C>, instr: usize) -> Result<bool, Error<'p>> {
-        Ok(self.execute_in(context, Some(instr)).unwrap_or(true))
+        Ok(self.execute_limited_in(context, instr))
     }
 }
 
