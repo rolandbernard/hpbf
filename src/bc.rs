@@ -177,6 +177,14 @@ impl<C: CellType> ir::CodeGen<C> for CodeGen<C> {
 }
 
 impl<C: CellType> CodeGen<C> {
+    /// Like a range extend but not to the end of the currently emitted program.
+    fn range_extend_to(&mut self, value: usize, to: usize) {
+        if self.ranges[value].first_use.is_none() {
+            self.ranges[value].first_use = Some(to);
+        }
+        self.ranges[value].last_use = Some(to);
+    }
+
     /// Like a read, but does not increment the uses counter, only extends the range.
     fn range_extend(&mut self, value: usize) {
         if self.ranges[value].created < self.current_start {
@@ -186,10 +194,7 @@ impl<C: CellType> CodeGen<C> {
                 self.outer_accessed.push(value);
             }
         }
-        if self.ranges[value].first_use.is_none() {
-            self.ranges[value].first_use = Some(self.insts.len());
-        }
-        self.ranges[value].last_use = Some(self.insts.len());
+        self.range_extend_to(value, self.insts.len());
     }
 
     /// Record in the live ranges that the given `value` has been accessed.
@@ -306,11 +311,11 @@ impl<C: CellType> CodeGen<C> {
                             let mut i = num_outer;
                             while i < self.outer_accessed.len() {
                                 let var = self.outer_accessed[i];
-                                if self.ranges[var].created > self.current_start {
+                                if self.ranges[var].created < self.current_start {
+                                    i += 1;
+                                } else {
                                     self.range_extend(var);
                                     self.outer_accessed.swap_remove(i);
-                                } else {
-                                    i += 1;
                                 }
                             }
                             let off = start_addr as isize + 1 - self.insts.len() as isize;
@@ -353,6 +358,16 @@ impl<C: CellType> CodeGen<C> {
                             continue;
                         }
                         dead.insert(mem);
+                    } else if let Loc::Tmp(tmp) = dst {
+                        if self.ranges[tmp].num_uses == 0 {
+                            for src in [src0, src1] {
+                                if let Loc::Tmp(tmp) = src {
+                                    self.ranges[tmp].num_uses -= 1;
+                                }
+                            }
+                            self.insts[i] = Instr::Noop;
+                            continue;
+                        }
                     }
                 }
                 Instr::Copy(dst, src) => {
@@ -417,7 +432,8 @@ impl<C: CellType> CodeGen<C> {
             free_regs.push(Reverse(i));
         }
         let mut free_temps = BinaryHeap::new();
-        let mut replacements = HashMap::<usize, (Loc<C>, usize)>::new();
+        let mut next_range_end = BinaryHeap::new();
+        let mut replacements = HashMap::new();
         for i in 0..self.insts.len() {
             match self.insts[i] {
                 Instr::Add(dst, src0, src1)
@@ -433,14 +449,18 @@ impl<C: CellType> CodeGen<C> {
                                     && [src0, src1].into_iter().all(|src| {
                                         !matches!(src, Loc::Mem(m) if self.has_write_in_range(m, i, first_use))
                                         && !matches!(src, Loc::Tmp(tmp) if matches!(
-                                            replacements.get(&tmp).unwrap().0,
-                                            Loc::Mem(m) if self.has_write_in_range(m, i, first_use)
+                                            replacements.get(&tmp).unwrap(),
+                                            &Loc::Mem(m) if self.has_write_in_range(m, i, first_use)
                                         ))
                                     })
                                 {
-                                    if num_uses - 1 != 0 {
-                                        replacements.insert(tmp, (Loc::Mem(mem), num_uses - 1));
+                                    for src in [src0, src1] {
+                                        if let Loc::Tmp(tmp) = src {
+                                            self.range_extend_to(tmp, first_use);
+                                        }
                                     }
+                                    replacements.insert(tmp, Loc::Mem(mem));
+                                    next_range_end.push((Reverse(last_use), tmp));
                                     self.insts[first_use] = self.insts[i];
                                     self.insts[i] = Instr::Noop;
                                     if let Instr::Add(dst, _, _)
@@ -456,38 +476,41 @@ impl<C: CellType> CodeGen<C> {
                 }
                 _ => { /* Handled later. */ }
             }
-            let mut read_temp = |tmp: usize| {
-                let (new_loc, uses) = replacements.get_mut(&tmp).unwrap();
-                let new_loc = *new_loc;
-                *uses -= 1;
-                if *uses == 0 {
-                    if let Loc::Tmp(tmp) = new_loc {
-                        if tmp < num_regs {
-                            free_regs.push(Reverse(tmp));
-                        } else {
-                            free_temps.push(Reverse(tmp));
-                        }
-                    }
-                    replacements.remove(&tmp);
-                }
-                new_loc
-            };
             match &mut self.insts[i] {
                 Instr::Add(_, src0, src1)
                 | Instr::Sub(_, src0, src1)
                 | Instr::Mul(_, src0, src1) => {
                     for src in [src0, src1] {
                         if let Loc::Tmp(tmp) = src {
-                            *src = read_temp(*tmp);
+                            *src = *replacements.get(tmp).unwrap();
                         }
                     }
                 }
                 Instr::Copy(_, src) => {
                     if let Loc::Tmp(tmp) = src {
-                        *src = read_temp(*tmp);
+                        *src = *replacements.get(tmp).unwrap();
                     }
                 }
                 _ => { /* These do not access temps. */ }
+            }
+            while let Some((Reverse(end), tmp)) = next_range_end.peek() {
+                if *end <= i {
+                    let last_use = self.ranges[*tmp].last_use.unwrap();
+                    if *end >= last_use {
+                        if let Some(Loc::Tmp(tmp)) = replacements.remove(tmp) {
+                            if tmp < num_regs {
+                                free_regs.push(Reverse(tmp));
+                            } else {
+                                free_temps.push(Reverse(tmp));
+                            }
+                        }
+                    } else {
+                        next_range_end.push((Reverse(last_use), *tmp));
+                    }
+                    next_range_end.pop();
+                } else {
+                    break;
+                }
             }
             let can_alloc_reg = match self.insts[i] {
                 Instr::Add(Loc::Tmp(tmp), _, _)
@@ -506,7 +529,8 @@ impl<C: CellType> CodeGen<C> {
                 | Instr::Copy(dst, _) = instr
                 {
                     if let Loc::Tmp(old) = dst {
-                        let live = self.ranges[*old].last_use.unwrap() - i;
+                        let last_use = self.ranges[*old].last_use.unwrap();
+                        let live = last_use - i;
                         let mut tmp = None;
                         if live < 16 {
                             // Don't allocate registers to temps with long live ranges.
@@ -520,7 +544,8 @@ impl<C: CellType> CodeGen<C> {
                             next_fresh += 1;
                         }
                         let Reverse(tmp) = tmp.unwrap();
-                        replacements.insert(*old, (Loc::Tmp(tmp), self.ranges[*old].num_uses));
+                        replacements.insert(*old, Loc::Tmp(tmp));
+                        next_range_end.push((Reverse(last_use), *old));
                         *dst = Loc::Tmp(tmp);
                     }
                 }
@@ -543,13 +568,15 @@ impl<C: CellType> CodeGen<C> {
                                 self.insts[i] = Instr::Noop;
                             } else {
                                 if let Loc::Imm(_) = src {
-                                    replacements.insert(tmp, (src, num_uses));
+                                    replacements.insert(tmp, src);
+                                    next_range_end.push((Reverse(last_use), tmp));
                                     self.insts[i] = Instr::Noop;
                                 } else if let Loc::Mem(mem) = src {
                                     if (num_uses == 1 || !can_alloc_reg)
                                         && !self.has_write_in_range(mem, i, last_use)
                                     {
-                                        replacements.insert(tmp, (src, num_uses));
+                                        replacements.insert(tmp, src);
+                                        next_range_end.push((Reverse(last_use), tmp));
                                         self.insts[i] = Instr::Noop;
                                     } else {
                                         alloc_temp(&mut self.insts[i]);
