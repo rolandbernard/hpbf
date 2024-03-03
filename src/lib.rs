@@ -1,13 +1,15 @@
-mod ast;
-mod runtime;
+//! Library for executing Brainfuck programs.
 
-#[cfg(feature = "llvm")]
-mod codegen;
+mod hasher;
+mod smallvec;
 
-use std::fmt::Debug;
+pub mod bc;
+pub mod exec;
+pub mod ir;
+pub mod opt;
+pub mod runtime;
 
-pub use ast::{optimize, parse, Block, Instr};
-pub use runtime::Context;
+use std::{fmt::Debug, hash::Hash};
 
 /// Kind of error that might be encountered during the parsing of a Brainfuck
 /// program or other operations preventing execution.
@@ -23,13 +25,15 @@ pub enum ErrorKind {
 /// Error that might be encountered during the parsing of a Brainfuck program.
 /// Contains the index of the character that caused the error.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub struct Error {
+pub struct Error<'str> {
     pub kind: ErrorKind,
+    pub str: &'str str,
     pub position: usize,
 }
 
-/// Only types implementing this trait are allowed for the cells.
-pub trait CellType: Copy + PartialEq + Debug {
+/// Only types implementing this trait are allowed for the cells. It is
+/// implemented in this library for [`u8`], [`u16`], [`u32`], and [`u64`].
+pub trait CellType: Copy + Ord + Hash + Debug + 'static {
     /// Number of bits of this type. Needed for code generation.
     const BITS: u32;
 
@@ -37,14 +41,14 @@ pub trait CellType: Copy + PartialEq + Debug {
     const ONE: Self;
     const NEG_ONE: Self;
 
-    /// Convert an input byte into a cell value.
-    fn from_u8(val: u8) -> Self;
-
-    /// Convert a cell value into an output byte.
-    fn into_u8(self) -> u8;
-
-    /// Convert a cell value into an unsigned 64 bit value.
+    /// Convert a cell value into an unsigned 64 bit value. Zero extend.
     fn into_u64(self) -> u64;
+
+    /// Convert a cell value into an signed 64 bit value. Sign extend.
+    fn into_i64(self) -> i64;
+
+    /// Convert from an unsigned 64 bit value to a cell value.
+    fn from_u64(val: u64) -> Self;
 
     /// Wrapping addition.
     fn wrapping_add(self, rhs: Self) -> Self;
@@ -54,9 +58,6 @@ pub trait CellType: Copy + PartialEq + Debug {
 
     /// Return the value `x` such that `x.wrapping_add(self) == Self::ZERO`.
     fn wrapping_neg(self) -> Self;
-
-    /// Return true if the value is odd.
-    fn is_odd(self) -> bool;
 
     /// Bitwise and operation.
     fn bitand(self, rhs: Self) -> Self;
@@ -69,6 +70,11 @@ pub trait CellType: Copy + PartialEq + Debug {
 
     /// Returns the number of trailing zeros.
     fn trailing_zeros(self) -> u32;
+
+    /// Return true if the value is odd.
+    fn is_odd(self) -> bool {
+        self.bitand(Self::ONE) == Self::ONE
+    }
 
     /// Wrapping exponentiation.
     fn wrapping_pow(mut self, mut exp: Self) -> Self {
@@ -83,9 +89,43 @@ pub trait CellType: Copy + PartialEq + Debug {
         return result;
     }
 
-    /// Compute the value `x` such that `x.wrapping_mul(other) == self`. It
-    /// should be noted that the semantics of this are very different from the
-    /// standard `wrapping_div` that Rust provides for integer types.
+    /// Compute the multiplicative inverse of `self`. Unlike [`Self::wrapping_div`],
+    /// this never works when `self` is even.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hpbf::CellType;
+    /// assert_eq!(<u8 as CellType>::wrapping_inv(5), Some(205));
+    /// assert_eq!(<u8 as CellType>::wrapping_inv(1), Some(1));
+    /// assert_eq!(<u8 as CellType>::wrapping_inv(7), Some(183));
+    /// assert_eq!(<u8 as CellType>::wrapping_inv(2), None);
+    /// assert_eq!(<u8 as CellType>::wrapping_inv(4), None);
+    /// assert_eq!(<u8 as CellType>::wrapping_inv(64), None);
+    /// ```
+    fn wrapping_inv(self) -> Option<Self> {
+        if self.is_odd() {
+            let tot = Self::ONE.wrapping_shl(Self::BITS - 1);
+            let inv = self.wrapping_pow(tot.wrapping_add(Self::NEG_ONE));
+            Some(inv)
+        } else {
+            None
+        }
+    }
+
+    /// Compute the smallest value `x` such that `x.wrapping_mul(other) == self`.
+    /// It should be noted that the semantics of this are very different from
+    /// the standard `wrapping_div` that Rust provides for integer types.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hpbf::CellType;
+    /// assert_eq!(<u8 as CellType>::wrapping_div(5, 5), Some(1));
+    /// assert_eq!(<u8 as CellType>::wrapping_div(5, 1), Some(5));
+    /// assert_eq!(<u8 as CellType>::wrapping_div(5, 2), None);
+    /// assert_eq!(<u8 as CellType>::wrapping_div(8, 7), Some(184));
+    /// assert_eq!(<u8 as CellType>::wrapping_div(32, 4), Some(8));
+    /// assert_eq!(<u8 as CellType>::wrapping_div(32, 64), None);
+    /// ```
     fn wrapping_div(self, div: Self) -> Option<Self> {
         let shift = div.trailing_zeros();
         if self == Self::ZERO {
@@ -106,6 +146,26 @@ pub trait CellType: Copy + PartialEq + Debug {
             )
         }
     }
+
+    /// Convert an input byte into a cell value.
+    fn from_u8(val: u8) -> Self {
+        Self::from_u64(val as u64)
+    }
+
+    /// Convert a cell value into an output byte.
+    fn into_u8(self) -> u8 {
+        self.into_u64() as u8
+    }
+
+    /// Convert a signed 16 bit integer into a cell value.
+    fn from_i16(val: i16) -> Self {
+        Self::from_u64(val as i64 as u64)
+    }
+
+    /// Convert a cell value into a signed 16 bit integer, if possible.
+    fn try_into_i16(self) -> Option<i16> {
+        self.into_i64().try_into().ok()
+    }
 }
 
 impl CellType for u8 {
@@ -115,16 +175,16 @@ impl CellType for u8 {
     const ONE: Self = 1;
     const NEG_ONE: Self = u8::MAX;
 
-    fn from_u8(val: u8) -> Self {
-        val
-    }
-
-    fn into_u8(self) -> u8 {
-        self
-    }
-
     fn into_u64(self) -> u64 {
         self as u64
+    }
+
+    fn from_u64(val: u64) -> Self {
+        val as u8
+    }
+
+    fn into_i64(self) -> i64 {
+        self as i8 as i64
     }
 
     fn wrapping_add(self, rhs: Self) -> Self {
@@ -137,10 +197,6 @@ impl CellType for u8 {
 
     fn wrapping_neg(self) -> Self {
         self.wrapping_neg()
-    }
-
-    fn is_odd(self) -> bool {
-        self % 2 == 1
     }
 
     fn bitand(self, rhs: Self) -> Self {
@@ -167,16 +223,16 @@ impl CellType for u16 {
     const ONE: Self = 1;
     const NEG_ONE: Self = u16::MAX;
 
-    fn from_u8(val: u8) -> Self {
+    fn into_u64(self) -> u64 {
+        self as u64
+    }
+
+    fn from_u64(val: u64) -> Self {
         val as u16
     }
 
-    fn into_u8(self) -> u8 {
-        self as u8
-    }
-
-    fn into_u64(self) -> u64 {
-        self as u64
+    fn into_i64(self) -> i64 {
+        self as i16 as i64
     }
 
     fn wrapping_add(self, rhs: Self) -> Self {
@@ -189,10 +245,6 @@ impl CellType for u16 {
 
     fn wrapping_neg(self) -> Self {
         self.wrapping_neg()
-    }
-
-    fn is_odd(self) -> bool {
-        self % 2 == 1
     }
 
     fn bitand(self, rhs: Self) -> Self {
@@ -219,16 +271,16 @@ impl CellType for u32 {
     const ONE: Self = 1;
     const NEG_ONE: Self = u32::MAX;
 
-    fn from_u8(val: u8) -> Self {
+    fn into_u64(self) -> u64 {
+        self as u64
+    }
+
+    fn from_u64(val: u64) -> Self {
         val as u32
     }
 
-    fn into_u8(self) -> u8 {
-        self as u8
-    }
-
-    fn into_u64(self) -> u64 {
-        self as u64
+    fn into_i64(self) -> i64 {
+        self as i32 as i64
     }
 
     fn wrapping_add(self, rhs: Self) -> Self {
@@ -241,10 +293,6 @@ impl CellType for u32 {
 
     fn wrapping_neg(self) -> Self {
         self.wrapping_neg()
-    }
-
-    fn is_odd(self) -> bool {
-        self % 2 == 1
     }
 
     fn bitand(self, rhs: Self) -> Self {
@@ -271,16 +319,16 @@ impl CellType for u64 {
     const ONE: Self = 1;
     const NEG_ONE: Self = u64::MAX;
 
-    fn from_u8(val: u8) -> Self {
-        val as u64
-    }
-
-    fn into_u8(self) -> u8 {
-        self as u8
-    }
-
     fn into_u64(self) -> u64 {
         self
+    }
+
+    fn from_u64(val: u64) -> Self {
+        val
+    }
+
+    fn into_i64(self) -> i64 {
+        self as i64
     }
 
     fn wrapping_add(self, rhs: Self) -> Self {
@@ -293,10 +341,6 @@ impl CellType for u64 {
 
     fn wrapping_neg(self) -> Self {
         self.wrapping_neg()
-    }
-
-    fn is_odd(self) -> bool {
-        self % 2 == 1
     }
 
     fn bitand(self, rhs: Self) -> Self {
@@ -313,5 +357,53 @@ impl CellType for u64 {
 
     fn trailing_zeros(self) -> u32 {
         self.trailing_zeros()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::CellType;
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn wrapping_div_is_smallest() {
+        for div in 0..=255 {
+            let mut inv = HashMap::new();
+            for x in 0..=255 {
+                inv.entry(x.wrapping_mul(div)).or_insert(x);
+            }
+            for num in 0..=255 {
+                if let Some(x) = <u8 as CellType>::wrapping_div(num, div) {
+                    assert_eq!(x.wrapping_mul(div), num);
+                    assert_eq!(inv.get(&num), Some(&x));
+                } else {
+                    assert!(!inv.contains_key(&num));
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn wrapping_div_is_smallest_u16() {
+        for div in (0..=u16::MAX)
+            .step_by(7919)
+            .flat_map(|i| [i, i + 1].into_iter())
+        {
+            let mut inv = HashMap::new();
+            for x in 0..=u16::MAX {
+                inv.entry(x.wrapping_mul(div)).or_insert(x);
+            }
+            for num in 0..=u16::MAX {
+                if let Some(x) = <u16 as CellType>::wrapping_div(num, div) {
+                    assert_eq!(x.wrapping_mul(div), num);
+                    assert_eq!(inv.get(&num), Some(&x));
+                } else {
+                    assert!(!inv.contains_key(&num));
+                }
+            }
+        }
     }
 }

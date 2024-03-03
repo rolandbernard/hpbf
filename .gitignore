@@ -10,3 +10,4 @@ target
 result
 output
 coverage
+fuzz-errors
