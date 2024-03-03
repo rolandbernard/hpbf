@@ -61,6 +61,15 @@ struct Reg0;
 /// Read/write to the second register.
 struct Reg1;
 
+/// Read constant zero.
+struct Zero;
+
+/// Read constant one.
+struct One;
+
+/// Read constant negative one.
+struct NegOne;
+
 unsafe fn temps_ptr<C: CellType>(cxt: *mut OpsContext<C>) -> *mut C {
     ptr::addr_of_mut!((*cxt).temps) as *mut _
 }
@@ -195,6 +204,51 @@ impl<C: CellType> OpRead<C> for Reg1 {
         r1: C,
     ) -> C {
         r1
+    }
+}
+
+impl<C: CellType> OpRead<C> for Zero {
+    const SHIFT: usize = 0;
+
+    #[inline(always)]
+    unsafe fn read(
+        _cxt: *mut OpsContext<C>,
+        _mem: *mut C,
+        _ip: *const OpCode<C>,
+        _r0: C,
+        _r1: C,
+    ) -> C {
+        C::ZERO
+    }
+}
+
+impl<C: CellType> OpRead<C> for One {
+    const SHIFT: usize = 0;
+
+    #[inline(always)]
+    unsafe fn read(
+        _cxt: *mut OpsContext<C>,
+        _mem: *mut C,
+        _ip: *const OpCode<C>,
+        _r0: C,
+        _r1: C,
+    ) -> C {
+        C::ONE
+    }
+}
+
+impl<C: CellType> OpRead<C> for NegOne {
+    const SHIFT: usize = 0;
+
+    #[inline(always)]
+    unsafe fn read(
+        _cxt: *mut OpsContext<C>,
+        _mem: *mut C,
+        _ip: *const OpCode<C>,
+        _r0: C,
+        _r1: C,
+    ) -> C {
+        C::NEG_ONE
     }
 }
 
@@ -585,51 +639,31 @@ pub fn emit_return<C: CellType>(insts: &mut Vec<OpCode<C>>) {
 /// of source and target operands. Let's hope the compiler optimizes this somehow.
 /// However, this has a very negative effect on compile times.
 macro_rules! op_match {
-    (@loop $insts:ident, $inst:ident, $instr:path, $op:ident, , [$($match:tt)*], [$($gen:tt)*], [$($push:tt)*]) => (
+    (@loop $insts:ident, $inst:ident, $instr:path, $op:ident, , [$($match:tt)*], [$($cond:tt)*], [$($gen:tt)*], [$($push:tt)*]) => (
         if let $instr(Loc::Tmp(0), $($match)*) = $inst {
-            $insts.push(OpCode { op: $op::<_, Reg0, $($gen)*>, });
-            $($push)*
-            return;
+            if $($cond)* {
+                $insts.push(OpCode { op: $op::<_, Reg0, $($gen)*>, });
+                $($push)*
+                return;
+            }
         }
         if let $instr(Loc::Tmp(1), $($match)*) = $inst {
-            $insts.push(OpCode { op: $op::<_, Reg1, $($gen)*>, });
-            $($push)*
-            return;
+            if $($cond)* {
+                $insts.push(OpCode { op: $op::<_, Reg1, $($gen)*>, });
+                $($push)*
+                return;
+            }
         }
         if let $instr(Loc::Tmp(idx), $($match)*) = $inst {
-            $insts.push(OpCode { op: $op::<_, Tmp, $($gen)*>, });
-            $($push)*
-            $insts.push(OpCode { idx });
-            return;
-        }
-        if let $instr(Loc::Mem(off), $($match)*) = $inst {
-            $insts.push(OpCode { op: $op::<_, Mem, $($gen)*>, });
-            $($push)*
-            $insts.push(OpCode { off });
-            return;
-        }
-    );
-    (@loop $insts:ident, $inst:ident, $instr:path, $op:ident, w, [$($match:tt)*], [$($gen:tt)*], [$($push:tt)*]) => (
-        if let $instr(Loc::Tmp(0), Loc::Tmp(0), $($match)*) = $inst {
-            $insts.push(OpCode { op: $op::<_, Reg0, $($gen)*>, });
-            $($push)*
-            return;
-        }
-        if let $instr(Loc::Tmp(1), Loc::Tmp(1), $($match)*) = $inst {
-            $insts.push(OpCode { op: $op::<_, Reg1, $($gen)*>, });
-            $($push)*
-            return;
-        }
-        if let $instr(Loc::Tmp(idx), Loc::Tmp(idx2), $($match)*) = $inst {
-            if idx == idx2 {
+            if $($cond)* {
                 $insts.push(OpCode { op: $op::<_, Tmp, $($gen)*>, });
                 $($push)*
                 $insts.push(OpCode { idx });
                 return;
             }
         }
-        if let $instr(Loc::Mem(off), Loc::Mem(off2), $($match)*) = $inst {
-            if off == off2 {
+        if let $instr(Loc::Mem(off), $($match)*) = $inst {
+            if $($cond)* {
                 $insts.push(OpCode { op: $op::<_, Mem, $($gen)*>, });
                 $($push)*
                 $insts.push(OpCode { off });
@@ -637,30 +671,74 @@ macro_rules! op_match {
             }
         }
     );
-    (@loop $insts:ident, $inst:ident, $instr:path, $op:ident, r $($r:ident)*, [$($match:tt)*], [$($gen:tt)*], [$($push:tt)*]) => (
+    (@loop $insts:ident, $inst:ident, $instr:path, $op:ident, w, [$($match:tt)*], [$($cond:tt)*], [$($gen:tt)*], [$($push:tt)*]) => (
+        if let $instr(Loc::Tmp(0), Loc::Tmp(0), $($match)*) = $inst {
+            if $($cond)* {
+                $insts.push(OpCode { op: $op::<_, Reg0, $($gen)*>, });
+                $($push)*
+                return;
+            }
+        }
+        if let $instr(Loc::Tmp(1), Loc::Tmp(1), $($match)*) = $inst {
+            if $($cond)* {
+                $insts.push(OpCode { op: $op::<_, Reg1, $($gen)*>, });
+                $($push)*
+                return;
+            }
+        }
+        if let $instr(Loc::Tmp(idx), Loc::Tmp(idx2), $($match)*) = $inst {
+            if idx == idx2 && $($cond)* {
+                $insts.push(OpCode { op: $op::<_, Tmp, $($gen)*>, });
+                $($push)*
+                $insts.push(OpCode { idx });
+                return;
+            }
+        }
+        if let $instr(Loc::Mem(off), Loc::Mem(off2), $($match)*) = $inst {
+            if off == off2 && $($cond)* {
+                $insts.push(OpCode { op: $op::<_, Mem, $($gen)*>, });
+                $($push)*
+                $insts.push(OpCode { off });
+                return;
+            }
+        }
+    );
+    (@loop $insts:ident, $inst:ident, $instr:path, $op:ident, r $($r:ident)*, [$($match:tt)*], [$($cond:tt)*], [$($gen:tt)*], [$($push:tt)*]) => (
         op_match!(
             @loop $insts, $inst, $instr, $op, $($r)*,
-            [Loc::Tmp(0), $($match)*], [Reg0, $($gen)*], [$($push)*]
+            [Loc::Tmp(0), $($match)*], [$($cond)*], [Reg0, $($gen)*], [$($push)*]
         );
         op_match!(
             @loop $insts, $inst, $instr, $op, $($r)*,
-            [Loc::Tmp(1), $($match)*], [Reg1, $($gen)*], [$($push)*]
+            [Loc::Tmp(1), $($match)*], [$($cond)*], [Reg1, $($gen)*], [$($push)*]
         );
         op_match!(
             @loop $insts, $inst, $instr, $op, $($r)*,
-            [Loc::Tmp(idx), $($match)*], [Tmp, $($gen)*], [$insts.push(OpCode { idx }); $($push)*]
+            [Loc::Tmp(idx), $($match)*], [$($cond)*], [Tmp, $($gen)*], [$insts.push(OpCode { idx }); $($push)*]
         );
         op_match!(
             @loop $insts, $inst, $instr, $op, $($r)*,
-            [Loc::Mem(off), $($match)*], [Mem, $($gen)*], [$insts.push(OpCode { off }); $($push)*]
+            [Loc::Mem(off), $($match)*], [$($cond)*], [Mem, $($gen)*], [$insts.push(OpCode { off }); $($push)*]
         );
         op_match!(
             @loop $insts, $inst, $instr, $op, $($r)*,
-            [Loc::Imm(val), $($match)*], [Imm, $($gen)*], [$insts.push(OpCode { val }); $($push)*]
+            [Loc::Imm(val), $($match)*], [val == C::ZERO && $($cond)*], [Zero, $($gen)*], [$($push)*]
+        );
+        op_match!(
+            @loop $insts, $inst, $instr, $op, $($r)*,
+            [Loc::Imm(val), $($match)*], [val == C::ONE && $($cond)*], [One, $($gen)*], [$($push)*]
+        );
+        op_match!(
+            @loop $insts, $inst, $instr, $op, $($r)*,
+            [Loc::Imm(val), $($match)*], [val == C::NEG_ONE && $($cond)*], [NegOne, $($gen)*], [$($push)*]
+        );
+        op_match!(
+            @loop $insts, $inst, $instr, $op, $($r)*,
+            [Loc::Imm(val), $($match)*], [$($cond)*], [Imm, $($gen)*], [$insts.push(OpCode { val }); $($push)*]
         );
     );
     ($insts:ident, $inst:ident, $instr:path, $op:ident, $($r:ident)*) => (
-        op_match!(@loop $insts, $inst, $instr, $op, $($r)*, [], [], []);
+        op_match!(@loop $insts, $inst, $instr, $op, $($r)*, [], [true], [], []);
     );
 }
 
