@@ -83,6 +83,12 @@ impl<C: CellType> IrInterpreter<C> {
                     if cxt.memory.read(*cond) != C::ZERO {
                         self.execute_block(cxt, block, limit)?;
                         cxt.memory.mov(block.shift);
+                        if let Some(lim) = limit {
+                            if *lim == 0 {
+                                return Some(false);
+                            }
+                            *lim -= 1;
+                        }
                     }
                 }
             }

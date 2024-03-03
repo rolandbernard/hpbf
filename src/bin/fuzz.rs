@@ -60,7 +60,7 @@ fn result_with<'code, C: CellType, E: Executor<'code, C>>(
     let mut output = Vec::new();
     let mut context = Context::new(Some(Box::new(&input[..])), Some(Box::new(&mut output)));
     let exec = E::create(code, opt).unwrap();
-    let finished = exec.execute_limited(&mut context, 100_000).unwrap();
+    let finished = exec.execute_limited(&mut context, 50_000).unwrap();
     drop(context);
     return (finished, output);
 }
@@ -91,20 +91,34 @@ fn compare_results(a: &(bool, Vec<u8>), b: &(bool, Vec<u8>)) -> bool {
 /// of all the executors is identical.
 fn check_code<'code>(code: &'code str) -> bool {
     let inplace = result_with::<u8, InplaceInterpreter<'code, u8>>(code, 0);
-    let irint = result_with::<u8, IrInterpreter<u8>>(code, 0);
-    if !compare_results(&inplace, &irint) {
+    let irint0 = result_with::<u8, IrInterpreter<u8>>(code, 0);
+    if !compare_results(&inplace, &irint0) {
         return false;
     }
-    let bcint = result_with::<u8, BcInterpreter<u8>>(code, 0);
-    if !compare_results(&inplace, &bcint) || !compare_results(&irint, &bcint) {
+    let irint1 = result_with::<u8, IrInterpreter<u8>>(code, 1);
+    if !compare_results(&inplace, &irint1) || !compare_results(&irint0, &irint1) {
         return false;
     }
-    let bcint = result_with::<u8, BcInterpreter<u8>>(code, 1);
-    if !compare_results(&inplace, &bcint) || !compare_results(&irint, &bcint) {
+    let irint2 = result_with::<u8, IrInterpreter<u8>>(code, 4);
+    if !compare_results(&inplace, &irint2) || !compare_results(&irint1, &irint2) {
         return false;
     }
-    let bcint = result_with::<u8, BcInterpreter<u8>>(code, 4);
-    if !compare_results(&inplace, &bcint) || !compare_results(&irint, &bcint) {
+    let bcint0 = result_with::<u8, BcInterpreter<u8>>(code, 0);
+    if !compare_results(&inplace, &bcint0) || !compare_results(&irint2, &bcint0) {
+        return false;
+    }
+    let bcint1 = result_with::<u8, BcInterpreter<u8>>(code, 1);
+    if !compare_results(&inplace, &bcint1)
+        || !compare_results(&irint2, &bcint1)
+        || !compare_results(&bcint0, &bcint1)
+    {
+        return false;
+    }
+    let bcint2 = result_with::<u8, BcInterpreter<u8>>(code, 4);
+    if !compare_results(&inplace, &bcint2)
+        || !compare_results(&irint2, &bcint2)
+        || !compare_results(&bcint1, &bcint2)
+    {
         return false;
     }
     return true;
@@ -118,6 +132,13 @@ fn minimize_code(hasher: &mut impl Hasher, code: String) -> String {
         .cycle()
         .skip(hasher.finish() as usize % code.len())
         .take(code.len())
+        .filter(|&i| code_bytes[i] == b'[')
+        .chain(
+            (0..code.len())
+                .cycle()
+                .skip(hasher.finish() as usize % code.len())
+                .take(code.len()),
+        )
     {
         let next;
         if code_bytes[i] == b']' {

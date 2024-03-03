@@ -64,7 +64,7 @@ struct RangeInfo {
 }
 
 /// Computation to be used with the global value numbering.
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy)]
 pub enum GvnExpr<C: CellType> {
     Imm(C),
     Mem(isize),
@@ -79,6 +79,7 @@ pub struct CodeGen<C: CellType> {
     max_accessed: isize,
     writes: HashMap<isize, BTreeSet<usize>>,
     ranges: Vec<RangeInfo>,
+    exprs: Vec<GvnExpr<C>>,
     values: HashMap<GvnExpr<C>, usize>,
     insts: Vec<Instr<C>>,
     current_start: usize,
@@ -210,6 +211,7 @@ impl<C: CellType> CodeGen<C> {
                 last_use: None,
                 num_uses: 0,
             });
+            self.exprs.push(expr);
             if let GvnExpr::Add(a, b) | GvnExpr::Sub(a, b) | GvnExpr::Mul(a, b) = expr {
                 self.read(a);
                 self.read(b);
@@ -283,6 +285,7 @@ impl<C: CellType> CodeGen<C> {
                             self.values.remove(&GvnExpr::Mem(var));
                         }
                     }
+                    let prev_exprs = self.exprs.len();
                     let num_outer = self.outer_accessed.len();
                     let start_addr = self.insts.len();
                     if !is_loop || !block.insts.is_empty() {
@@ -295,9 +298,7 @@ impl<C: CellType> CodeGen<C> {
                             self.insts.push(Instr::Mov(block.shift))
                         }
                     } else {
-                        if block.shift != 0 {
-                            self.insts.push(Instr::Scan(*cond, block.shift));
-                        }
+                        self.insts.push(Instr::Scan(*cond, block.shift));
                     }
                     if !is_loop || !block.insts.is_empty() {
                         if is_loop {
@@ -323,6 +324,9 @@ impl<C: CellType> CodeGen<C> {
                     }
                     for &var in &sub_anal.writes {
                         self.values.remove(&GvnExpr::Mem(var));
+                    }
+                    for expr in &self.exprs[prev_exprs..] {
+                        self.values.remove(expr);
                     }
                     block_idx += 1;
                 }
@@ -647,6 +651,7 @@ impl<C: CellType> CodeGen<C> {
             max_accessed: analysis.max_accessed,
             writes: HashMap::new(),
             ranges: Vec::new(),
+            exprs: Vec::new(),
             values: HashMap::new(),
             insts: Vec::new(),
             current_start: 0,

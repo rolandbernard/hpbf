@@ -129,27 +129,54 @@ macro_rules! executor_tests {
 // The following are not actually unused, but the compiler seems to think it is.
 #[allow(unused_macros)]
 macro_rules! same_as_inplace_test_inner {
-    ($i:ident, $c:expr) => {
+    ($i:ident, $c:expr, $l:expr) => {
         let code = $c;
         let mut input = Vec::new();
         for i in 0..1024 {
             input.push((183 * i) as u8);
         }
         let mut out_inplace = input.clone();
-        let mut out_to_test = input.clone();
         let mut ctx_inplace = Context::<u8>::new(
             Some(Box::new(&input[..])),
             Some(Box::new(&mut out_inplace[..])),
         );
-        let mut ctx_to_test = Context::<u8>::new(
-            Some(Box::new(&input[..])),
-            Some(Box::new(&mut out_to_test[..])),
-        );
-        InplaceInterpreter::<u8>::create(code, 3)?.execute(&mut ctx_inplace)?;
-        $i::<u8>::create(code, 3)?.execute(&mut ctx_to_test)?;
+        let finished_inplace;
+        if $l {
+            finished_inplace = InplaceInterpreter::<u8>::create(code, 0)?
+                .execute_limited(&mut ctx_inplace, 50_000)?;
+        } else {
+            InplaceInterpreter::<u8>::create(code, 0)?.execute(&mut ctx_inplace)?;
+            finished_inplace = true;
+        }
         drop(ctx_inplace);
-        drop(ctx_to_test);
-        assert_eq!(out_to_test, out_inplace);
+        for opt in 0..3 {
+            let mut out_to_test = input.clone();
+            let mut ctx_to_test = Context::<u8>::new(
+                Some(Box::new(&input[..])),
+                Some(Box::new(&mut out_to_test[..])),
+            );
+            let finished;
+            if $l {
+                finished =
+                    $i::<u8>::create(code, opt)?.execute_limited(&mut ctx_to_test, 50_000)?;
+            } else {
+                $i::<u8>::create(code, opt)?.execute(&mut ctx_to_test)?;
+                finished = true;
+            }
+            drop(ctx_to_test);
+            if finished_inplace && finished {
+                assert_eq!(out_to_test, out_inplace);
+            } else {
+                if finished_inplace {
+                    assert!(out_inplace.len() >= out_to_test.len());
+                }
+                if finished {
+                    assert!(out_to_test.len() >= out_inplace.len());
+                }
+                let len = out_to_test.len().min(out_inplace.len());
+                assert_eq!(&out_to_test[..len], &out_inplace[..len]);
+            }
+        }
         return Ok(());
     };
 }
@@ -159,7 +186,7 @@ macro_rules! same_as_inplace_test {
     ($i:ident, $c:expr, $n:ident) => {
         #[test]
         fn $n() -> Result<(), Error<'static>> {
-            same_as_inplace_test_inner!($i, $c);
+            same_as_inplace_test_inner!($i, $c, false);
         }
     };
 }
@@ -170,7 +197,18 @@ macro_rules! same_as_inplace_test_no_miri {
         #[test]
         #[cfg_attr(miri, ignore)]
         fn $n() -> Result<(), Error<'static>> {
-            same_as_inplace_test_inner!($i, $c);
+            same_as_inplace_test_inner!($i, $c, false);
+        }
+    };
+}
+
+#[allow(unused_macros)]
+macro_rules! same_as_inplace_test_limited {
+    ($i:ident, $c:expr, $n:ident) => {
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn $n() -> Result<(), Error<'static>> {
+            same_as_inplace_test_inner!($i, $c, true);
         }
     };
 }
@@ -277,6 +315,23 @@ macro_rules! same_as_inplace_tests {
                 $i,
                 "-<<<+>>>[<<<<<<[>>+<<-]>>>[<<<+>>>-]<[>+<-]<.>>]",
                 must_not_delay_if_params_are_written
+            );
+            same_as_inplace_test!(
+                $i,
+                "[[---]+][-]+.",
+                values_from_loop_that_maybe_runs
+            );
+
+            // These do not terminate normally.
+            same_as_inplace_test_limited!(
+                $i,
+                "+>><<[.>-[]]",
+                empty_infinite_loop_inside_other_loop
+            );
+            same_as_inplace_test_limited!(
+                $i,
+                "...,,[[>,.<]]",
+                infinite_loop_inside_other_loop
             );
 
             // Manually created test cases.
