@@ -49,6 +49,9 @@ trait OpWrite<C: CellType>: OpRead<C> {
 /// Read/write from a memory location. The offset is passed in the instruction stream.
 struct Mem;
 
+/// Read from a memory location and zero it. The offset is passed in the instruction stream.
+struct MemZero;
+
 /// Read/write from a temporary. The index is passed in the instruction stream.
 struct Tmp;
 
@@ -144,6 +147,24 @@ impl<C: CellType> OpRead<C> for Mem {
         _r1: C,
     ) -> C {
         *mem.offset((*ip).off)
+    }
+}
+
+impl<C: CellType> OpRead<C> for MemZero {
+    const SHIFT: usize = 1;
+
+    #[inline(always)]
+    unsafe fn read(
+        _cxt: *mut OpsContext<C>,
+        mem: *mut C,
+        ip: *const OpCode<C>,
+        _r0: C,
+        _r1: C,
+    ) -> C {
+        let off = (*ip).off;
+        let result = *mem.offset(off);
+        *mem.offset(off) = C::ZERO;
+        result
     }
 }
 
@@ -719,6 +740,10 @@ macro_rules! op_match {
         op_match!(
             @loop $insts, $inst, $instr, $op, $($r)*,
             [Loc::Mem(off), $($match)*], [$($cond)*], [Mem, $($gen)*], [$insts.push(OpCode { off }); $($push)*]
+        );
+        op_match!(
+            @loop $insts, $inst, $instr, $op, $($r)*,
+            [Loc::MemZero(off), $($match)*], [$($cond)*], [MemZero, $($gen)*], [$insts.push(OpCode { off }); $($push)*]
         );
         op_match!(
             @loop $insts, $inst, $instr, $op, $($r)*,

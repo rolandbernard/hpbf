@@ -16,6 +16,7 @@ use crate::{
 #[derive(PartialEq, Hash, Clone, Copy)]
 pub enum Loc<C: CellType> {
     Mem(isize),
+    MemZero(isize),
     Tmp(usize),
     Imm(C),
 }
@@ -389,7 +390,7 @@ impl<C: CellType> CodeGen<C> {
                 Instr::Add(_, src0, src1)
                 | Instr::Sub(_, src0, src1)
                 | Instr::Mul(_, src0, src1) => {
-                    for src in [src0, src1] {
+                    for src in [src1, src0] {
                         if let Loc::Mem(mem) = src {
                             dead.remove(&mem);
                         }
@@ -624,6 +625,58 @@ impl<C: CellType> CodeGen<C> {
         }
     }
 
+    /// Find zeroing copies and move them to the last use.
+    fn zeroing_move_detection(&mut self) {
+        let mut zerod = HashMap::new();
+        for i in (0..self.insts.len()).rev() {
+            match &mut self.insts[i] {
+                Instr::Noop => { /* Does nothing. */ }
+                Instr::Add(dst, src0, src1)
+                | Instr::Sub(dst, src0, src1)
+                | Instr::Mul(dst, src0, src1) => {
+                    if let Loc::Mem(mem) = *dst {
+                        zerod.remove(&mem);
+                    }
+                    let mut to_remove = Vec::new();
+                    for src in [src1, src0] {
+                        if let Loc::Mem(mem) = src {
+                            if let Some(i) = zerod.remove(mem) {
+                                *src = Loc::MemZero(*mem);
+                                to_remove.push(i);
+                            }
+                        }
+                    }
+                    for i in to_remove {
+                        self.insts[i] = Instr::Noop;
+                    }
+                }
+                Instr::Copy(dst, src) => {
+                    if let Loc::Mem(mem) = *dst {
+                        zerod.remove(&mem);
+                        if let Loc::Imm(imm) = *src {
+                            if imm == C::ZERO {
+                                zerod.insert(mem, i);
+                            }
+                        }
+                    }
+                    if let Loc::Mem(mem) = src {
+                        if let Some(i) = zerod.remove(mem) {
+                            *src = Loc::MemZero(*mem);
+                            self.insts[i] = Instr::Noop;
+                        }
+                    }
+                }
+                Instr::BrNZ(_, _) | Instr::BrZ(_, _) | Instr::Mov(_) | Instr::Scan(_, _) => {
+                    zerod.clear();
+                }
+                Instr::Out(mem) | Instr::Inp(mem) => {
+                    zerod.remove(mem);
+                    zerod.remove(mem);
+                }
+            }
+        }
+    }
+
     /// The temporary allocation algorithm will likely generate a lot of noop
     /// instructions when it eliminates copy instructions. For simplicity of the
     /// preceding passes these are only removed at the end, as that requires
@@ -688,6 +741,7 @@ impl<C: CellType> CodeGen<C> {
         codegen.dead_store_elim();
         codegen.allocate_temps(num_regs);
         codegen.parameter_reordering();
+        codegen.zeroing_move_detection();
         codegen.strip_noops();
         let temp_size = codegen.count_temps();
         Program {
@@ -702,28 +756,50 @@ impl<C: CellType> CodeGen<C> {
 impl<C: CellType> Debug for Loc<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Loc::Mem(var) => write!(f, "[{var}]"),
+            Loc::Mem(var) | Loc::MemZero(var) => write!(f, "[{var}]"),
             Loc::Tmp(tmp) => write!(f, "%{tmp}"),
             Loc::Imm(imm) => write!(f, "{imm:?}"),
         }
     }
 }
 
+impl<C: CellType> Instr<C> {
+    fn fmt_at(&self, f: &mut fmt::Formatter<'_>, idx: usize) -> fmt::Result {
+        match self {
+            Instr::Noop => write!(f, "noop")?,
+            Instr::Scan(cond, shift) => write!(f, "scan [{cond}], {shift}")?,
+            Instr::Mov(shift) => write!(f, "mov {shift}")?,
+            Instr::Inp(dst) => write!(f, "inp [{dst}]")?,
+            Instr::Out(src) => write!(f, "out [{src}]")?,
+            Instr::BrZ(cond, off) => write!(f, "brz [{cond}], .L{}", idx as isize + *off)?,
+            Instr::BrNZ(cond, off) => write!(f, "brnz [{cond}], .L{}", idx as isize + *off)?,
+            Instr::Add(dst, src0, src1) => write!(f, "add {dst:?}, {src0:?}, {src1:?}")?,
+            Instr::Sub(dst, src0, src1) => write!(f, "sub {dst:?}, {src0:?}, {src1:?}")?,
+            Instr::Mul(dst, src0, src1) => write!(f, "mul {dst:?}, {src0:?}, {src1:?}")?,
+            Instr::Copy(dst, src) => write!(f, "copy {dst:?}, {src:?}")?,
+        }
+        match self {
+            Instr::Add(_, src0, src1) | Instr::Sub(_, src0, src1) | Instr::Mul(_, src0, src1) => {
+                for src in [src0, src1] {
+                    if let Loc::MemZero(mem) = src {
+                        write!(f, "; copy [{mem}], 0")?;
+                    }
+                }
+            }
+            Instr::Copy(_, src) => {
+                if let Loc::MemZero(mem) = src {
+                    write!(f, "; copy [{mem}], 0")?;
+                }
+            }
+            _ => { /* These have no locations. */ }
+        }
+        Ok(())
+    }
+}
+
 impl<C: CellType> Debug for Instr<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Instr::Noop => write!(f, "noop"),
-            Instr::Scan(cond, shift) => write!(f, "scan [{cond}], {shift}"),
-            Instr::Mov(shift) => write!(f, "mov {shift}"),
-            Instr::Inp(dst) => write!(f, "inp [{dst}]"),
-            Instr::Out(src) => write!(f, "out [{src}]"),
-            Instr::BrZ(cond, off) => write!(f, "brz [{cond}], {off}"),
-            Instr::BrNZ(cond, off) => write!(f, "brnz [{cond}], {off}"),
-            Instr::Add(dst, src0, src1) => write!(f, "add {dst:?}, {src0:?}, {src1:?}"),
-            Instr::Sub(dst, src0, src1) => write!(f, "sub {dst:?}, {src0:?}, {src1:?}"),
-            Instr::Mul(dst, src0, src1) => write!(f, "mul {dst:?}, {src0:?}, {src1:?}"),
-            Instr::Copy(dst, src) => write!(f, "copy {dst:?}, {src:?}"),
-        }
+        self.fmt_at(f, 0)
     }
 }
 
@@ -742,23 +818,8 @@ impl<C: CellType> Debug for Program<C> {
             if branch_target.contains(&i) {
                 writeln!(f, ".L{i}")?;
             }
-            match instr {
-                Instr::Noop => writeln!(f, "  noop")?,
-                Instr::Scan(cond, shift) => writeln!(f, "  scan [{cond}], {shift}")?,
-                Instr::Mov(shift) => writeln!(f, "  mov {shift}")?,
-                Instr::Inp(dst) => writeln!(f, "  inp [{dst}]")?,
-                Instr::Out(src) => writeln!(f, "  out [{src}]")?,
-                Instr::BrZ(cond, off) => {
-                    writeln!(f, "  brz [{cond}], .L{}", i.wrapping_add_signed(*off))?
-                }
-                Instr::BrNZ(cond, off) => {
-                    writeln!(f, "  brnz [{cond}], .L{}", i.wrapping_add_signed(*off))?
-                }
-                Instr::Add(dst, src0, src1) => writeln!(f, "  add {dst:?}, {src0:?}, {src1:?}")?,
-                Instr::Sub(dst, src0, src1) => writeln!(f, "  sub {dst:?}, {src0:?}, {src1:?}")?,
-                Instr::Mul(dst, src0, src1) => writeln!(f, "  mul {dst:?}, {src0:?}, {src1:?}")?,
-                Instr::Copy(dst, src) => writeln!(f, "  copy {dst:?}, {src:?}")?,
-            }
+            instr.fmt_at(f, i)?;
+            writeln!(f)?;
         }
         if branch_target.contains(&self.insts.len()) {
             writeln!(f, ".L{}", self.insts.len())?;
