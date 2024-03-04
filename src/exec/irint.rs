@@ -67,15 +67,20 @@ impl<C: CellType> IrInterpreter<C> {
                         }
                     }
                 }
-                Instr::Loop { cond, block } => {
-                    while cxt.memory.read(*cond) != C::ZERO {
-                        self.execute_block(cxt, block, limit)?;
-                        cxt.memory.mov(block.shift);
-                        if let Some(lim) = limit {
-                            if *lim == 0 {
-                                return Some(false);
+                Instr::Loop { cond, block, once } => {
+                    if *once || cxt.memory.read(*cond) != C::ZERO {
+                        loop {
+                            self.execute_block(cxt, block, limit)?;
+                            cxt.memory.mov(block.shift);
+                            if let Some(lim) = limit {
+                                if *lim == 0 {
+                                    return Some(false);
+                                }
+                                *lim -= 1;
                             }
-                            *lim -= 1;
+                            if cxt.memory.read(*cond) == C::ZERO {
+                                break;
+                            }
                         }
                     }
                 }

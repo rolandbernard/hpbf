@@ -128,7 +128,7 @@ impl Analysis {
                         anal.written(*var);
                     }
                 }
-                ir::Instr::Loop { cond, block } | ir::Instr::If { cond, block } => {
+                ir::Instr::Loop { cond, block, .. } | ir::Instr::If { cond, block } => {
                     anal.accessed(*cond);
                     let sub_analysis = Self::analyze(block);
                     anal.accessed(sub_analysis.min_accessed);
@@ -280,59 +280,65 @@ impl<C: CellType> CodeGen<C> {
                         self.mem_write(var, value);
                     }
                 }
-                ir::Instr::Loop { cond, block } | ir::Instr::If { cond, block } => {
+                ir::Instr::Loop { cond, block, .. } | ir::Instr::If { cond, block } => {
                     let is_loop = matches!(inst, ir::Instr::Loop { .. });
+                    let at_least_once = matches!(inst, ir::Instr::Loop { once: true, .. });
                     let sub_anal = &anal.sub_anal[block_idx];
                     if is_loop {
                         if sub_anal.has_shift {
                             self.values.clear();
-                        }
-                        for &var in &sub_anal.writes {
-                            self.values.remove(&GvnExpr::Mem(var));
+                        } else {
+                            for &var in &sub_anal.writes {
+                                self.values.remove(&GvnExpr::Mem(var));
+                            }
                         }
                     }
                     let prev_exprs = self.exprs.len();
                     let num_outer = self.outer_accessed.len();
-                    let start_addr = self.insts.len();
                     if !is_loop || !block.insts.is_empty() {
-                        if is_loop {
-                            self.current_start = self.insts.len();
+                        if !at_least_once {
+                            self.insts.push(Instr::Noop);
                         }
-                        self.insts.push(Instr::Noop);
+                        let start_instr = self.insts.len();
+                        if is_loop {
+                            self.current_start = start_instr;
+                        }
                         self.emit_block(block, sub_anal);
                         if block.shift != 0 {
                             self.insts.push(Instr::Mov(block.shift))
                         }
-                    } else {
-                        self.insts.push(Instr::Scan(*cond, block.shift));
-                    }
-                    if !is_loop || !block.insts.is_empty() {
                         if is_loop {
-                            self.current_start = prev_start;
                             let mut i = num_outer;
                             while i < self.outer_accessed.len() {
                                 let var = self.outer_accessed[i];
-                                if self.ranges[var].created < self.current_start {
+                                if self.ranges[var].created < prev_start {
                                     i += 1;
                                 } else {
                                     self.range_extend(var);
                                     self.outer_accessed.swap_remove(i);
                                 }
                             }
-                            let off = start_addr as isize + 1 - self.insts.len() as isize;
+                            let off = start_instr as isize - self.insts.len() as isize;
                             self.insts.push(Instr::BrNZ(*cond, off));
                         }
-                        let off = self.insts.len() as isize - start_addr as isize;
-                        self.insts[start_addr] = Instr::BrZ(*cond, off);
+                        if !at_least_once {
+                            let branch_at = start_instr - 1;
+                            let off = self.insts.len() as isize - branch_at as isize;
+                            self.insts[branch_at] = Instr::BrZ(*cond, off);
+                        }
+                        self.current_start = prev_start;
+                    } else {
+                        self.insts.push(Instr::Scan(*cond, block.shift));
                     }
                     if sub_anal.has_shift {
                         self.values.clear();
-                    }
-                    for &var in &sub_anal.writes {
-                        self.values.remove(&GvnExpr::Mem(var));
-                    }
-                    for expr in &self.exprs[prev_exprs..] {
-                        self.values.remove(expr);
+                    } else if !at_least_once {
+                        for &var in &sub_anal.writes {
+                            self.values.remove(&GvnExpr::Mem(var));
+                        }
+                        for expr in &self.exprs[prev_exprs..] {
+                            self.values.remove(expr);
+                        }
                     }
                     block_idx += 1;
                 }
@@ -433,9 +439,34 @@ impl<C: CellType> CodeGen<C> {
             free_regs.push(Reverse(i));
         }
         let mut free_temps = BinaryHeap::new();
-        let mut next_range_end = BinaryHeap::new();
+        let mut next_range_end = BinaryHeap::<(Reverse<usize>, usize)>::new();
         let mut replacements = HashMap::new();
         for i in 0..self.insts.len() {
+            let mut about_to_free = HashSet::new();
+            while let Some((Reverse(end), tmp)) = next_range_end.peek() {
+                if *end <= i {
+                    let last_use = self.ranges[*tmp].last_use.unwrap();
+                    if *end >= last_use {
+                        about_to_free.insert(*tmp);
+                    } else {
+                        next_range_end.push((Reverse(last_use), *tmp));
+                    }
+                    next_range_end.pop();
+                } else {
+                    break;
+                }
+            }
+            let can_alloc_reg = match self.insts[i] {
+                Instr::Add(Loc::Tmp(tmp), _, _)
+                | Instr::Sub(Loc::Tmp(tmp), _, _)
+                | Instr::Mul(Loc::Tmp(tmp), _, _)
+                | Instr::Copy(Loc::Tmp(tmp), _) => {
+                    let live = self.ranges[tmp].last_use.unwrap() - i;
+                    live < 16
+                        && (!free_regs.is_empty() || about_to_free.iter().any(|&x| x < num_regs))
+                }
+                _ => false,
+            };
             match self.insts[i] {
                 Instr::Add(dst, src0, src1)
                 | Instr::Sub(dst, src0, src1)
@@ -445,7 +476,7 @@ impl<C: CellType> CodeGen<C> {
                             let first_use = self.ranges[tmp].first_use.unwrap();
                             let num_uses = self.ranges[tmp].num_uses;
                             if let Instr::Copy(Loc::Mem(mem), _) = self.insts[first_use] {
-                                if num_uses == 1
+                                if (num_uses == 1 || !can_alloc_reg)
                                     && !self.has_write_in_range(mem, first_use + 1, last_use)
                                     && [src0, src1].into_iter().all(|src| {
                                         !matches!(src, Loc::Mem(m) if self.has_write_in_range(m, i, first_use))
@@ -458,6 +489,9 @@ impl<C: CellType> CodeGen<C> {
                                     for src in [src0, src1] {
                                         if let Loc::Tmp(tmp) = src {
                                             self.range_extend_to(tmp, first_use);
+                                            if about_to_free.remove(&tmp) {
+                                                next_range_end.push((Reverse(first_use), tmp));
+                                            }
                                         }
                                     }
                                     replacements.insert(tmp, Loc::Mem(mem));
@@ -494,35 +528,15 @@ impl<C: CellType> CodeGen<C> {
                 }
                 _ => { /* These do not access temps. */ }
             }
-            while let Some((Reverse(end), tmp)) = next_range_end.peek() {
-                if *end <= i {
-                    let last_use = self.ranges[*tmp].last_use.unwrap();
-                    if *end >= last_use {
-                        if let Some(Loc::Tmp(tmp)) = replacements.remove(tmp) {
-                            if tmp < num_regs {
-                                free_regs.push(Reverse(tmp));
-                            } else {
-                                free_temps.push(Reverse(tmp));
-                            }
-                        }
+            for tmp in about_to_free {
+                if let Some(Loc::Tmp(tmp)) = replacements.remove(&tmp) {
+                    if tmp < num_regs {
+                        free_regs.push(Reverse(tmp));
                     } else {
-                        next_range_end.push((Reverse(last_use), *tmp));
+                        free_temps.push(Reverse(tmp));
                     }
-                    next_range_end.pop();
-                } else {
-                    break;
                 }
             }
-            let can_alloc_reg = match self.insts[i] {
-                Instr::Add(Loc::Tmp(tmp), _, _)
-                | Instr::Sub(Loc::Tmp(tmp), _, _)
-                | Instr::Mul(Loc::Tmp(tmp), _, _)
-                | Instr::Copy(Loc::Tmp(tmp), _) => {
-                    let live = self.ranges[tmp].last_use.unwrap() - i;
-                    live < 16 && !free_regs.is_empty()
-                }
-                _ => false,
-            };
             let mut alloc_temp = |instr: &mut Instr<C>| {
                 if let Instr::Add(dst, _, _)
                 | Instr::Sub(dst, _, _)
@@ -818,6 +832,7 @@ impl<C: CellType> Debug for Program<C> {
             if branch_target.contains(&i) {
                 writeln!(f, ".L{i}")?;
             }
+            write!(f, "  ")?;
             instr.fmt_at(f, i)?;
             writeln!(f)?;
         }

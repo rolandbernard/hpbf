@@ -51,6 +51,7 @@ pub enum Instr<C: CellType> {
     Loop {
         cond: isize,
         block: Block<C>,
+        once: bool,
     },
     If {
         cond: isize,
@@ -764,12 +765,12 @@ impl<C: CellType> Program<C> {
     ///         shift: 1,
     ///         insts: vec![
     ///             Instr::add(0, 1),
-    ///             Loop { cond: 0, block: Block {
+    ///             Loop { cond: 0, once: false, block: Block {
     ///                 shift: -1,
     ///                 insts: vec![
     ///                     Instr::add(0, 254),
     ///                     Instr::add(1, 255),
-    ///                     Loop { cond: 1, block: Block {
+    ///                     Loop { cond: 1, once: false, block: Block {
     ///                         shift: 1,
     ///                         insts: vec![
     ///                             Instr::add(3, 1),
@@ -882,6 +883,7 @@ impl<C: CellType> Program<C> {
                                 shift: sub_shift - *shift,
                                 insts: sub_insts,
                             },
+                            once: false,
                         });
                     }
                 }
@@ -996,10 +998,16 @@ impl<C: CellType> Block<C> {
                         writeln!(f, "{:indent$})", "", indent = indent)?;
                     }
                 }
-                Instr::Loop { cond, block } => {
-                    writeln!(f, "{:indent$}loop [{}] {{", "", cond, indent = indent)?;
-                    block.print_block(f, indent + 2)?;
-                    writeln!(f, "{:indent$}}}", "", indent = indent)?;
+                Instr::Loop { cond, block, once } => {
+                    if *once {
+                        writeln!(f, "{:indent$}{{", "", indent = indent)?;
+                        block.print_block(f, indent + 2)?;
+                        writeln!(f, "{:indent$}}} loop [{}] ", "", cond, indent = indent)?;
+                    } else {
+                        writeln!(f, "{:indent$}loop [{}] {{", "", cond, indent = indent)?;
+                        block.print_block(f, indent + 2)?;
+                        writeln!(f, "{:indent$}}}", "", indent = indent)?;
+                    }
                 }
                 Instr::If { cond, block } => {
                     writeln!(f, "{:indent$}if [{}] {{", "", cond, indent = indent)?;
@@ -1060,7 +1068,8 @@ mod tests {
                                 Output { src: 1 },
                                 Instr::add(0, 254),
                             ]
-                        }
+                        },
+                        once: false
                     }
                 ]
             }

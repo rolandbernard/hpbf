@@ -914,7 +914,11 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
             insts: sub_state.insts,
         };
         if is_loop {
-            self.insts.push(Instr::Loop { cond, block });
+            self.insts.push(Instr::Loop {
+                cond,
+                block,
+                once: loop_anal.at_least_once,
+            });
             self.insert_written(cond, OptWrite::Known(Expr::val(C::ZERO)));
         } else {
             self.insts.push(Instr::If { cond, block });
@@ -1130,7 +1134,7 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
                 Instr::Calc { calcs } => {
                     self.perform_all(self.shift, calcs);
                 }
-                Instr::Loop { cond, block } | Instr::If { cond, block } => {
+                Instr::Loop { cond, block, .. } | Instr::If { cond, block } => {
                     let cond = *cond + self.shift;
                     let is_loop = matches!(instr, Instr::Loop { .. });
                     let sub_anal = if let Some(anal) = &mut self.anal {
@@ -1298,7 +1302,7 @@ impl<'a, C: CellType> OptDseState<'a, C> {
                         }
                     }
                 }
-                Instr::Loop { cond, block } | Instr::If { cond, block } => {
+                Instr::Loop { cond, block, .. } | Instr::If { cond, block } => {
                     block_idx -= 1;
                     self.read(*cond);
                     let sub_anal = &self.anal.sub_blocks[block_idx];
