@@ -27,11 +27,7 @@ pub struct InplaceInterpreter<'code, C: CellType> {
 
 impl<'code, C: CellType> InplaceInterpreter<'code, C> {
     /// Execute the brainfuck program in the given context.
-    fn execute_in(
-        &self,
-        cxt: &mut Context<C>,
-        mut limit: Option<usize>,
-    ) -> Result<bool, Error<'code>> {
+    fn execute_in(&self, cxt: &mut Context<C>, mut limit: Option<usize>) -> Result<bool, Error> {
         let code_bytes = self.code.as_bytes();
         let mut loop_stack = Vec::new();
         let mut pc = 0;
@@ -92,7 +88,7 @@ impl<'code, C: CellType> InplaceInterpreter<'code, C> {
                 b']' => {
                     let target = loop_stack.pop().ok_or(Error {
                         kind: ErrorKind::LoopNotOpened,
-                        str: self.code,
+                        str: self.code.to_owned(),
                         position: pc - 1,
                     })?;
                     if cxt.memory.read(0) != C::ZERO {
@@ -116,16 +112,12 @@ impl<'code, C: CellType> Executor<'code, C> for InplaceInterpreter<'code, C> {
     }
 }
 
-impl<'code, C: CellType> Executable<'code, C> for InplaceInterpreter<'code, C> {
-    fn execute(&self, context: &mut Context<C>) -> Result<(), Error<'code>> {
+impl<'code, C: CellType> Executable<C> for InplaceInterpreter<'code, C> {
+    fn execute(&self, context: &mut Context<C>) -> Result<(), Error> {
         self.execute_in(context, None).map(|_| ())
     }
 
-    fn execute_limited(
-        &self,
-        context: &mut Context<C>,
-        instr: usize,
-    ) -> Result<bool, Error<'code>> {
+    fn execute_limited(&self, context: &mut Context<C>, instr: usize) -> Result<bool, Error> {
         self.execute_in(context, Some(instr))
     }
 }

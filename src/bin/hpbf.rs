@@ -10,6 +10,9 @@ use hpbf::{
     CellType, Error, ErrorKind,
 };
 
+#[cfg(feature = "llvm")]
+use hpbf::exec::LlvmInterpreter;
+
 /// The kind of executor to use.
 enum ExecutorKind {
     PrintIr,
@@ -17,6 +20,8 @@ enum ExecutorKind {
     Inplace,
     IrInt,
     BcInt,
+    #[cfg(feature = "llvm")]
+    LlvmJit,
 }
 
 /// Print the CLI help text for this program to stdout.
@@ -37,6 +42,8 @@ fn print_help_text() {
     println!("   --inplace        Use the inplace non-optimizing interpreter");
     println!("   --ir-int         Use the internal IR interpreter");
     println!("   --bc-int         Use the optimizing bytecode interpreter");
+    #[cfg(feature = "llvm")]
+    println!("   --llvm-jit       Use the optimizing LLVM JIT compiler");
     println!("   --limit limit    Limit the number of instructions executed");
     println!("   -h,--help        Print this help text");
     println!("Arguments:");
@@ -98,6 +105,10 @@ fn execute_code<C: CellType>(
         ExecutorKind::BcInt => {
             exec = Some(Box::new(BcInterpreter::<C>::create(code, opt)?));
         }
+        #[cfg(feature = "llvm")]
+        ExecutorKind::LlvmJit => {
+            exec = Some(Box::new(LlvmInterpreter::<C>::create(code, opt)?));
+        }
     }
     if let Some(exec) = exec {
         if let Some(limit) = limit {
@@ -127,7 +138,7 @@ fn main() {
                     if let Err(_) = file.read_to_string(&mut code) {
                         print_error(Error {
                             kind: ErrorKind::FileEncodingError,
-                            str: &arg,
+                            str: arg,
                             position: 0,
                         });
                         has_error = true;
@@ -136,7 +147,7 @@ fn main() {
                 Err(_) => {
                     print_error(Error {
                         kind: ErrorKind::FileReadFailed,
-                        str: &arg,
+                        str: arg,
                         position: 0,
                     });
                     has_error = true;
@@ -156,6 +167,8 @@ fn main() {
                 "--inplace" => kind = ExecutorKind::Inplace,
                 "--ir-int" => kind = ExecutorKind::IrInt,
                 "--bc-int" => kind = ExecutorKind::BcInt,
+                #[cfg(feature = "llvm")]
+                "--llvm-jit" => kind = ExecutorKind::LlvmJit,
                 "-O0" => opt = 0,
                 "-O1" => opt = 1,
                 "-O2" => opt = 2,

@@ -5,7 +5,7 @@ macro_rules! executor_tests {
             use crate::{exec::{Executor, Executable, $i}, runtime::Context, Error};
 
             #[test]
-            fn simple_execution() -> Result<(), Error<'static>> {
+            fn simple_execution() -> Result<(), Error> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
                 // https://esolangs.org/wiki/Brainfuck#Examples
@@ -19,7 +19,7 @@ macro_rules! executor_tests {
             }
 
             #[test]
-            fn simple_execution_u16() -> Result<(), Error<'static>> {
+            fn simple_execution_u16() -> Result<(), Error> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u16>::new(None, Some(Box::new(&mut buf)));
                 // https://esolangs.org/wiki/Brainfuck#Examples
@@ -33,7 +33,7 @@ macro_rules! executor_tests {
             }
 
             #[test]
-            fn simple_execution_u32() -> Result<(), Error<'static>> {
+            fn simple_execution_u32() -> Result<(), Error> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u32>::new(None, Some(Box::new(&mut buf)));
                 // https://esolangs.org/wiki/Brainfuck#Examples
@@ -47,7 +47,7 @@ macro_rules! executor_tests {
             }
 
             #[test]
-            fn simple_execution_u64() -> Result<(), Error<'static>> {
+            fn simple_execution_u64() -> Result<(), Error> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
                 // https://esolangs.org/wiki/Brainfuck#Examples
@@ -62,7 +62,7 @@ macro_rules! executor_tests {
 
             #[test]
             #[cfg_attr(miri, ignore)]
-            fn test_program_access_distant_cell() -> Result<(), Error<'static>> {
+            fn test_program_access_distant_cell() -> Result<(), Error> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
                 // https://brainfuck.org/tests.b
@@ -76,7 +76,7 @@ macro_rules! executor_tests {
             }
 
             #[test]
-            fn test_program_output_h() -> Result<(), Error<'static>> {
+            fn test_program_output_h() -> Result<(), Error> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u64>::new(None, Some(Box::new(&mut buf)));
                 // https://brainfuck.org/tests.b
@@ -91,7 +91,7 @@ macro_rules! executor_tests {
 
             #[test]
             #[cfg_attr(miri, ignore)]
-            fn test_program_rot13() -> Result<(), Error<'static>> {
+            fn test_program_rot13() -> Result<(), Error> {
                 let mut buf = Vec::new();
                 let mut ctx = Context::<u8>::new(
                     Some(Box::new("~mlk zyx".as_bytes())),
@@ -185,7 +185,7 @@ macro_rules! same_as_inplace_test_inner {
 macro_rules! same_as_inplace_test {
     ($i:ident, $c:expr, $n:ident) => {
         #[test]
-        fn $n() -> Result<(), Error<'static>> {
+        fn $n() -> Result<(), Error> {
             same_as_inplace_test_inner!($i, $c, false);
         }
     };
@@ -196,7 +196,7 @@ macro_rules! same_as_inplace_test_no_miri {
     ($i:ident, $c:expr, $n:ident) => {
         #[test]
         #[cfg_attr(miri, ignore)]
-        fn $n() -> Result<(), Error<'static>> {
+        fn $n() -> Result<(), Error> {
             same_as_inplace_test_inner!($i, $c, false);
         }
     };
@@ -207,7 +207,7 @@ macro_rules! same_as_inplace_test_limited {
     ($i:ident, $c:expr, $n:ident) => {
         #[test]
         #[cfg_attr(miri, ignore)]
-        fn $n() -> Result<(), Error<'static>> {
+        fn $n() -> Result<(), Error> {
             same_as_inplace_test_inner!($i, $c, true);
         }
     };

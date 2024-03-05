@@ -1,3 +1,5 @@
+//! Operations of the threaded code instruction stream.
+
 use std::ptr;
 
 use crate::{

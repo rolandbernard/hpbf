@@ -110,13 +110,13 @@ impl<'p, C: CellType> Executor<'p, C> for IrInterpreter<C> {
     }
 }
 
-impl<'p, C: CellType> Executable<'p, C> for IrInterpreter<C> {
-    fn execute(&self, context: &mut Context<C>) -> Result<(), Error<'p>> {
+impl<C: CellType> Executable<C> for IrInterpreter<C> {
+    fn execute(&self, context: &mut Context<C>) -> Result<(), Error> {
         self.execute_block(context, &self.program, &mut None);
         Ok(())
     }
 
-    fn execute_limited(&self, context: &mut Context<C>, limit: usize) -> Result<bool, Error<'p>> {
+    fn execute_limited(&self, context: &mut Context<C>, limit: usize) -> Result<bool, Error> {
         Ok(self
             .execute_block(context, &self.program, &mut Some(limit))
             .unwrap_or(true))

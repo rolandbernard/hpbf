@@ -154,7 +154,7 @@ impl<C: CellType> BcInterpreter<C> {
     }
 }
 
-impl<'p, C: CellType> Executor<'p, C> for BcInterpreter<C> {
+impl<'code, C: CellType> Executor<'code, C> for BcInterpreter<C> {
     fn create(code: &str, opt: u32) -> Result<Self, Error> {
         let mut program = ir::Program::<C>::parse(code)?;
         program = program.optimize(opt);
@@ -163,13 +163,13 @@ impl<'p, C: CellType> Executor<'p, C> for BcInterpreter<C> {
     }
 }
 
-impl<'p, C: CellType> Executable<'p, C> for BcInterpreter<C> {
-    fn execute(&self, context: &mut Context<C>) -> Result<(), Error<'p>> {
+impl<C: CellType> Executable<C> for BcInterpreter<C> {
+    fn execute(&self, context: &mut Context<C>) -> Result<(), Error> {
         self.execute_in(context);
         Ok(())
     }
 
-    fn execute_limited(&self, context: &mut Context<C>, instr: usize) -> Result<bool, Error<'p>> {
+    fn execute_limited(&self, context: &mut Context<C>, instr: usize) -> Result<bool, Error> {
         Ok(self.execute_limited_in(context, instr))
     }
 }

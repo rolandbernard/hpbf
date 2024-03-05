@@ -788,7 +788,7 @@ impl<C: CellType> Program<C> {
     /// );
     /// # Ok::<(), Error>(())
     /// ```
-    pub fn parse<'str>(program: &'str str) -> Result<Self, Error<'str>> {
+    pub fn parse<'str>(program: &'str str) -> Result<Self, Error> {
         let mut stack = vec![(0, false, Vec::new(), HashMap::new())];
         let mut positions = vec![];
         for (i, char) in program.chars().enumerate() {
@@ -829,7 +829,7 @@ impl<C: CellType> Program<C> {
                     if positions.len() == 0 {
                         return Err(Error {
                             kind: ErrorKind::LoopNotOpened,
-                            str: program,
+                            str: program.to_owned(),
                             position: i,
                         });
                     }
@@ -893,7 +893,7 @@ impl<C: CellType> Program<C> {
         if stack.len() != 1 {
             return Err(Error {
                 kind: ErrorKind::LoopNotClosed,
-                str: program,
+                str: program.to_owned(),
                 position: *positions.last().unwrap(),
             });
         }
@@ -1050,7 +1050,7 @@ mod tests {
     use Instr::*;
 
     #[test]
-    fn parsing_valid_brainfuck_returns_block() -> Result<(), Error<'static>> {
+    fn parsing_valid_brainfuck_returns_block() -> Result<(), Error> {
         let prog = Program::<u8>::parse("+++++[>[-],.<--]")?;
         assert_eq!(
             prog,
@@ -1085,7 +1085,7 @@ mod tests {
             prog,
             Err(Error {
                 kind: ErrorKind::LoopNotClosed,
-                str: code,
+                str: code.to_owned(),
                 position: 5
             })
         );
@@ -1099,7 +1099,7 @@ mod tests {
             prog,
             Err(Error {
                 kind: ErrorKind::LoopNotOpened,
-                str: code,
+                str: code.to_owned(),
                 position: 12
             })
         );

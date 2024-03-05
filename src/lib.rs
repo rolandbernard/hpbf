@@ -24,10 +24,10 @@ pub enum ErrorKind {
 
 /// Error that might be encountered during the parsing of a Brainfuck program.
 /// Contains the index of the character that caused the error.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct Error<'str> {
+#[derive(Clone, PartialEq, Debug)]
+pub struct Error {
     pub kind: ErrorKind,
-    pub str: &'str str,
+    pub str: String,
     pub position: usize,
 }
 
