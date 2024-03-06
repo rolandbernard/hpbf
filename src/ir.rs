@@ -956,6 +956,42 @@ impl<C: CellType> Debug for Expr<C> {
 }
 
 impl<C: CellType> Block<C> {
+    /// Return the minimum and maximum memory addressed directly accessed by this block.
+    /// Note that this will always keep 0 in the returned range, to ensue that the
+    /// memory pointer will always be in bounds after bounds checking.
+    pub fn compute_min_max_accessed(&self) -> (isize, isize) {
+        let mut min = 0;
+        let mut max = 0;
+        for instr in &self.insts {
+            match instr {
+                Instr::Output { src } => {
+                    min = min.min(*src);
+                    max = max.max(*src);
+                }
+                Instr::Input { dst } => {
+                    min = min.min(*dst);
+                    max = max.max(*dst);
+                }
+                Instr::Calc { calcs } => {
+                    for (var, calc) in calcs {
+                        min = min.min(*var);
+                        max = max.max(*var);
+                        for var in calc.variables() {
+                            min = min.min(var);
+                            max = max.max(var);
+                        }
+                    }
+                }
+                Instr::Loop { cond, block, .. } | Instr::If { cond, block } => {
+                    let (sub_min, sub_max) = block.compute_min_max_accessed();
+                    min = min.min(*cond).min(sub_min);
+                    max = max.max(*cond).max(sub_max);
+                }
+            }
+        }
+        (min, max)
+    }
+
     /// Pretty print the block indented by `indent` spaces into the formatter `f`.
     /// Referenced blocks are printed recursively.
     fn print_block(&self, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt::Result {
