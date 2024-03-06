@@ -21,6 +21,8 @@ enum ExecutorKind {
     IrInt,
     BcInt,
     #[cfg(feature = "llvm")]
+    PrintLlvm,
+    #[cfg(feature = "llvm")]
     LlvmJit,
 }
 
@@ -39,6 +41,8 @@ fn print_help_text() {
     println!("   -i64             Run the code using a cell size of 64 bit");
     println!("   --print-ir       Print ir code to stdout and do not execute");
     println!("   --print-bc       Print byte code to stdout and do not execute");
+    #[cfg(feature = "llvm")]
+    println!("   --print-llvm     Print LLVM IR code to stdout and do not execute");
     println!("   --inplace        Use the inplace non-optimizing interpreter");
     println!("   --ir-int         Use the internal IR interpreter");
     println!("   --bc-int         Use the optimizing bytecode interpreter");
@@ -106,6 +110,12 @@ fn execute_code<C: CellType>(
             exec = Some(Box::new(BcInterpreter::<C>::create(code, opt)?));
         }
         #[cfg(feature = "llvm")]
+        ExecutorKind::PrintLlvm => {
+            let int = LlvmInterpreter::<C>::create(code, opt)?;
+            println!("{}", int.print_llvm_ir()?);
+            exec = None;
+        }
+        #[cfg(feature = "llvm")]
         ExecutorKind::LlvmJit => {
             exec = Some(Box::new(LlvmInterpreter::<C>::create(code, opt)?));
         }
@@ -167,6 +177,8 @@ fn main() {
                 "--inplace" => kind = ExecutorKind::Inplace,
                 "--ir-int" => kind = ExecutorKind::IrInt,
                 "--bc-int" => kind = ExecutorKind::BcInt,
+                #[cfg(feature = "llvm")]
+                "--print-llvm" => kind = ExecutorKind::PrintLlvm,
                 #[cfg(feature = "llvm")]
                 "--llvm-jit" => kind = ExecutorKind::LlvmJit,
                 "-O0" => opt = 0,

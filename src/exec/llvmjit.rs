@@ -390,6 +390,11 @@ impl<'cxt, C: CellType> CodeGen<'cxt, C> {
 }
 
 impl<C: CellType> LlvmInterpreter<C> {
+    pub fn print_llvm_ir(&self) -> Result<String, Error> {
+        let context = inkwell::context::Context::create();
+        let code_gen = CodeGen::create(&context, self)?;
+        Ok(code_gen.module.print_to_string().to_string())
+    }
 
     fn enter_jit_code(&self, cxt: &mut Context<C>, code_gen: &CodeGen<C>) -> Result<(), Error> {
         let opt_level = match self.opt {
