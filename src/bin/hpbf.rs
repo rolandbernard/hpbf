@@ -34,7 +34,7 @@ fn print_help_text() {
     );
     println!("Options:");
     println!("   -f,--file file   Read the code from the given file");
-    println!("   -O{{0|1|2|3|4}}    Apply different levels of optimization");
+    println!("   -O{{0|1|2|3|4|5}}  Apply different levels of optimization");
     println!("   -i8              Run the code using a cell size of 8 bit");
     println!("   -i16             Run the code using a cell size of 16 bit");
     println!("   -i32             Run the code using a cell size of 32 bit");
@@ -186,6 +186,7 @@ fn main() {
                 "-O2" => opt = 2,
                 "-O3" => opt = 3,
                 "-O4" => opt = 4,
+                "-O5" => opt = 5,
                 "-i8" => bits = 8,
                 "-i16" => bits = 16,
                 "-i32" => bits = 32,

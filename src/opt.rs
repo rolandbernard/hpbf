@@ -1368,7 +1368,7 @@ impl<C: CellType> Program<C> {
             };
             let mut prog;
             (prog, anal) = self.optimize_once(anal);
-            for _ in 1..level {
+            for _ in 1..(level.min(3)) {
                 prog.dead_store_elimination(&anal);
                 (prog, anal) = prog.optimize_once(anal);
             }

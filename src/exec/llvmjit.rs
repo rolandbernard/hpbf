@@ -4,15 +4,19 @@ use inkwell::{
     attributes::{Attribute, AttributeLoc},
     builder::{Builder, BuilderError},
     execution_engine::JitFunction,
-    module::Module,
+    module::{Linkage, Module},
     passes::PassBuilderOptions,
-    targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetData, TargetMachine},
+    targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine},
     types::{IntType, PointerType, StructType, VoidType},
     values::{FunctionValue, IntValue, PointerValue},
     AddressSpace, IntPredicate, OptimizationLevel,
 };
 
-use crate::{ir::Program, runtime::Context, CellType, Error, ErrorKind};
+use crate::{
+    ir::{self, Block, Instr, Program},
+    runtime::Context,
+    CellType, Error, ErrorKind,
+};
 
 use super::{Executable, Executor};
 
@@ -28,18 +32,22 @@ pub struct LlvmInterpreter<C: CellType> {
 type HpbfEntry<'a, C> = unsafe extern "C" fn(cxt: *mut Context<'a, C>, mem: *mut C);
 
 /// Struct holding information needed during LLVM IR generation.
-struct CodeGen<'cxt, C: CellType> {
-    inp: &'cxt LlvmInterpreter<C>,
+struct CodeGen<'cxt, 'int: 'cxt, C: CellType> {
+    inp: &'int LlvmInterpreter<C>,
     context: &'cxt inkwell::context::Context,
     module: Module<'cxt>,
     builder: Builder<'cxt>,
-    target_data: TargetData,
     target_machine: TargetMachine,
     void_type: VoidType<'cxt>,
     int_type: IntType<'cxt>,
     intptr_type: IntType<'cxt>,
     ptr_type: PointerType<'cxt>,
     cxt_type: StructType<'cxt>,
+}
+
+struct LlvmCodeGenCalc<'a, 'cxt, 'int, C: CellType> {
+    codegen: &'a CodeGen<'cxt, 'int, C>,
+    mem_ptr: PointerValue<'cxt>,
 }
 
 /// Create an LLVM error with the given string.
@@ -51,8 +59,42 @@ fn llvm_error<S: ToString>(str: S) -> Error {
     }
 }
 
-impl<'cxt, C: CellType> CodeGen<'cxt, C> {
-    fn apply_runtime_func_attributes(&self, func: &FunctionValue, read_none: bool) {
+impl<'a, 'b: 'c, 'c, C: CellType> ir::CodeGen<C> for LlvmCodeGenCalc<'a, 'b, 'c, C> {
+    type Output = IntValue<'c>;
+    type Error = BuilderError;
+
+    fn imm(&mut self, imm: C) -> Result<Self::Output, Self::Error> {
+        Ok(self.codegen.int_type.const_int(imm.into_u64(), false))
+    }
+
+    fn mem(&mut self, var: isize) -> Result<Self::Output, Self::Error> {
+        let ptr = self.codegen.build_load_pointer(
+            self.mem_ptr,
+            self.codegen.intptr_type.const_int(var as u64, false),
+            true,
+        )?;
+        Ok(self
+            .codegen
+            .builder
+            .build_load(self.codegen.int_type, ptr, "value")?
+            .into_int_value())
+    }
+
+    fn add(&mut self, a: Self::Output, b: Self::Output) -> Result<Self::Output, Self::Error> {
+        self.codegen.builder.build_int_add(a, b, "value")
+    }
+
+    fn sub(&mut self, a: Self::Output, b: Self::Output) -> Result<Self::Output, Self::Error> {
+        self.codegen.builder.build_int_sub(a, b, "value")
+    }
+
+    fn mul(&mut self, a: Self::Output, b: Self::Output) -> Result<Self::Output, Self::Error> {
+        self.codegen.builder.build_int_mul(a, b, "value")
+    }
+}
+
+impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
+    fn apply_runtime_func_attributes(&self, func: &FunctionValue<'cxt>, read_none: bool) {
         let readnone_kind = Attribute::get_named_enum_kind_id("readnone");
         let nocapture_kind = Attribute::get_named_enum_kind_id("nocapture");
         let cold_kind = Attribute::get_named_enum_kind_id("cold");
@@ -98,7 +140,13 @@ impl<'cxt, C: CellType> CodeGen<'cxt, C> {
         );
     }
 
-    fn create_runtime_func_defs(&self) -> (FunctionValue, FunctionValue, FunctionValue) {
+    fn create_runtime_func_defs(
+        &self,
+    ) -> (
+        FunctionValue<'cxt>,
+        FunctionValue<'cxt>,
+        FunctionValue<'cxt>,
+    ) {
         let runtime_extend = self.module.add_function(
             "hpbf_context_extend",
             self.void_type.fn_type(
@@ -145,7 +193,10 @@ impl<'cxt, C: CellType> CodeGen<'cxt, C> {
         }
     }
 
-    fn create_mov_func_def(&self, rt_extend: FunctionValue) -> Result<FunctionValue, BuilderError> {
+    fn create_mov_func_def(
+        &self,
+        rt_extend: FunctionValue<'cxt>,
+    ) -> Result<FunctionValue<'cxt>, BuilderError> {
         let mov = self.module.add_function(
             "mov",
             self.ptr_type.fn_type(
@@ -157,7 +208,7 @@ impl<'cxt, C: CellType> CodeGen<'cxt, C> {
                 ],
                 false,
             ),
-            None,
+            Some(Linkage::Private),
         );
         let cxt_ptr = mov.get_nth_param(0).unwrap().into_pointer_value();
         let mem_ptr = mov.get_nth_param(1).unwrap().into_pointer_value();
@@ -224,89 +275,207 @@ impl<'cxt, C: CellType> CodeGen<'cxt, C> {
         Ok(mov)
     }
 
-    fn create_scan_func_def(&self, mov: FunctionValue) -> Result<FunctionValue, BuilderError> {
-        let scan = self.module.add_function(
-            "scan",
-            self.ptr_type.fn_type(
-                &[
-                    self.ptr_type.into(),
-                    self.ptr_type.into(),
-                    self.intptr_type.into(),
-                    self.intptr_type.into(),
-                    self.intptr_type.into(),
-                ],
-                false,
-            ),
-            None,
-        );
-        let cxt_ptr = scan.get_nth_param(0).unwrap().into_pointer_value();
-        let mem_ptr = scan.get_nth_param(1).unwrap().into_pointer_value();
-        let cond = scan.get_nth_param(2).unwrap().into_int_value();
-        let shift = scan.get_nth_param(3).unwrap().into_int_value();
-        let probe = scan.get_nth_param(4).unwrap().into_int_value();
-        let entry = self.context.append_basic_block(scan, "entry");
-        let check = self.context.append_basic_block(scan, "check");
-        let body = self.context.append_basic_block(scan, "body");
-        let exit = self.context.append_basic_block(scan, "exit");
-        self.builder.position_at_end(entry);
-        self.builder.build_unconditional_branch(check)?;
-        self.builder.position_at_end(check);
-        let mem_ptr_phi = self.builder.build_phi(self.ptr_type, "mem_ptr")?;
-        let cond_ptr = self.build_load_pointer(
-            mem_ptr_phi.as_basic_value().into_pointer_value(),
-            cond,
-            true,
-        )?;
-        let cond = self
-            .builder
-            .build_load(self.int_type, cond_ptr, "cond")?
-            .into_int_value();
-        let cond_zero = self.builder.build_int_compare(
-            IntPredicate::EQ,
-            cond,
-            self.int_type.const_zero(),
-            "cond_zero",
-        )?;
-        self.builder
-            .build_conditional_branch(cond_zero, exit, body)?;
-        self.builder.position_at_end(body);
-        let moved_mem_ptr = self
-            .builder
-            .build_call(
-                mov,
-                &[cxt_ptr.into(), mem_ptr.into(), shift.into(), probe.into()],
-                "mem_ptr",
-            )?
-            .try_as_basic_value()
-            .unwrap_left();
-        self.builder.build_unconditional_branch(check)?;
-        mem_ptr_phi.add_incoming(&[(&mem_ptr, entry), (&moved_mem_ptr, body)]);
-        self.builder.position_at_end(exit);
-        self.builder
-            .build_return(Some(&mem_ptr_phi.as_basic_value()))?;
-        Ok(scan)
+    fn compile_block(
+        &self,
+        rt_input: FunctionValue<'cxt>,
+        rt_output: FunctionValue<'cxt>,
+        mov: FunctionValue<'cxt>,
+        block: &Block<C>,
+        func: FunctionValue<'cxt>,
+        cxt_ptr: PointerValue<'cxt>,
+        mut mem_ptr: PointerValue<'cxt>,
+    ) -> Result<PointerValue<'cxt>, BuilderError> {
+        for inst in &block.insts {
+            match inst {
+                Instr::Output { src } => {
+                    let ptr = self.build_load_pointer(
+                        mem_ptr,
+                        self.intptr_type.const_int(*src as u64, false),
+                        true,
+                    )?;
+                    let value = self.builder.build_load(self.int_type, ptr, "value")?;
+                    self.builder
+                        .build_call(rt_output, &[cxt_ptr.into(), value.into()], "")?;
+                }
+                Instr::Input { dst } => {
+                    let value = self
+                        .builder
+                        .build_call(rt_input, &[cxt_ptr.into()], "value")?
+                        .try_as_basic_value()
+                        .unwrap_left();
+                    let ptr = self.build_load_pointer(
+                        mem_ptr,
+                        self.intptr_type.const_int(*dst as u64, false),
+                        true,
+                    )?;
+                    self.builder.build_store(ptr, value)?;
+                }
+                Instr::Calc { calcs } => {
+                    let mut codegen = LlvmCodeGenCalc {
+                        codegen: self,
+                        mem_ptr,
+                    };
+                    let mut values = Vec::new();
+                    for (var, calc) in calcs {
+                        values.push((*var, calc.codegen(&mut codegen, |_| 0)?));
+                    }
+                    for (var, value) in values {
+                        let ptr = self.build_load_pointer(
+                            mem_ptr,
+                            self.intptr_type.const_int(var as u64, false),
+                            true,
+                        )?;
+                        self.builder.build_store(ptr, value)?;
+                    }
+                }
+                Instr::Loop { cond, block, .. } => {
+                    let prev = self.builder.get_insert_block().unwrap();
+                    let check = self.context.append_basic_block(func, "check");
+                    let body = self.context.append_basic_block(func, "body");
+                    let next = self.context.append_basic_block(func, "next");
+                    self.builder.build_unconditional_branch(check)?;
+                    self.builder.position_at_end(check);
+                    let mem_ptr_phi = self.builder.build_phi(self.ptr_type, "mem_ptr")?;
+                    let mem_ptr_next = mem_ptr_phi.as_basic_value().into_pointer_value();
+                    let ptr = self.build_load_pointer(
+                        mem_ptr_next,
+                        self.intptr_type.const_int(*cond as u64, false),
+                        true,
+                    )?;
+                    let value = self
+                        .builder
+                        .build_load(self.int_type, ptr, "value")?
+                        .into_int_value();
+                    let is_zero = self.builder.build_int_compare(
+                        IntPredicate::EQ,
+                        value,
+                        self.int_type.const_zero(),
+                        "check",
+                    )?;
+                    self.builder.build_conditional_branch(is_zero, next, body)?;
+                    self.builder.position_at_end(body);
+                    let new_mem_ptr = self.compile_block(
+                        rt_input,
+                        rt_output,
+                        mov,
+                        block,
+                        func,
+                        cxt_ptr,
+                        mem_ptr_next,
+                    )?;
+                    self.builder.build_unconditional_branch(check)?;
+                    let body_end = self.builder.get_insert_block().unwrap();
+                    mem_ptr_phi.add_incoming(&[(&mem_ptr, prev), (&new_mem_ptr, body_end)]);
+                    self.builder.position_at_end(next);
+                    mem_ptr = mem_ptr_next;
+                }
+                Instr::If { cond, block } => {
+                    let prev = self.builder.get_insert_block().unwrap();
+                    let body = self.context.append_basic_block(func, "body");
+                    let next = self.context.append_basic_block(func, "next");
+                    let ptr = self.build_load_pointer(
+                        mem_ptr,
+                        self.intptr_type.const_int(*cond as u64, false),
+                        true,
+                    )?;
+                    let value = self
+                        .builder
+                        .build_load(self.int_type, ptr, "value")?
+                        .into_int_value();
+                    let is_zero = self.builder.build_int_compare(
+                        IntPredicate::EQ,
+                        value,
+                        self.int_type.const_zero(),
+                        "check",
+                    )?;
+                    self.builder.build_conditional_branch(is_zero, next, body)?;
+                    self.builder.position_at_end(body);
+                    let new_mem_ptr = self
+                        .compile_block(rt_input, rt_output, mov, block, func, cxt_ptr, mem_ptr)?;
+                    self.builder.build_unconditional_branch(next)?;
+                    let body_end = self.builder.get_insert_block().unwrap();
+                    self.builder.position_at_end(next);
+                    let mem_ptr_phi = self.builder.build_phi(self.ptr_type, "mem_ptr")?;
+                    mem_ptr_phi.add_incoming(&[(&mem_ptr, prev), (&new_mem_ptr, body_end)]);
+                    mem_ptr = mem_ptr_phi.as_basic_value().into_pointer_value();
+                }
+            }
+        }
+        if block.shift != 0 {
+            mem_ptr = self
+                .builder
+                .build_call(
+                    mov,
+                    &[
+                        cxt_ptr.into(),
+                        mem_ptr.into(),
+                        self.intptr_type.const_int(block.shift as u64, true).into(),
+                        self.intptr_type
+                            .const_int(
+                                if block.shift < 0 {
+                                    self.inp.min_accessed as u64
+                                } else {
+                                    self.inp.max_accessed as u64
+                                },
+                                true,
+                            )
+                            .into(),
+                    ],
+                    "mem_ptr",
+                )?
+                .try_as_basic_value()
+                .unwrap_left()
+                .into_pointer_value();
+        }
+        Ok(mem_ptr)
     }
 
     fn compile_program(
         &self,
-        rt_input: FunctionValue,
-        rt_output: FunctionValue,
-        mov: FunctionValue,
-        scan: FunctionValue,
+        rt_input: FunctionValue<'cxt>,
+        rt_output: FunctionValue<'cxt>,
+        mov: FunctionValue<'cxt>,
     ) -> Result<(), BuilderError> {
+        let func = self.module.add_function(
+            "hpbf_entry",
+            self.void_type.fn_type(&[self.ptr_type.into()], false),
+            None,
+        );
+        let cxt_ptr = func.get_nth_param(0).unwrap().into_pointer_value();
+        let entry = self.context.append_basic_block(func, "entry");
+        self.builder.position_at_end(entry);
+        let mem_base_ptr =
+            self.builder
+                .build_struct_gep(self.cxt_type, cxt_ptr, 0, "mem_base_ptr")?;
+        let mem_base = self
+            .builder
+            .build_load(self.ptr_type, mem_base_ptr, "mem_base")?
+            .into_pointer_value();
+        let mem_off_ptr =
+            self.builder
+                .build_struct_gep(self.cxt_type, cxt_ptr, 2, "mem_off_ptr")?;
+        let mem_off = self
+            .builder
+            .build_load(self.intptr_type, mem_off_ptr, "mem_off")?
+            .into_int_value();
+        let mem_ptr = self.build_load_pointer(mem_base, mem_off, true)?;
+        self.compile_block(
+            rt_input,
+            rt_output,
+            mov,
+            &self.inp.program,
+            func,
+            cxt_ptr,
+            mem_ptr,
+        )?;
+        self.builder.build_return(None)?;
         Ok(())
     }
 
     fn create(
         context: &'cxt inkwell::context::Context,
-        inp: &'cxt LlvmInterpreter<C>,
-    ) -> Result<Self, Error> {
-        let opt_level = match inp.opt {
-            0 => OptimizationLevel::None,
-            1 => OptimizationLevel::Less,
-            2 => OptimizationLevel::Default,
-            _ => OptimizationLevel::Aggressive,
-        };
+        inp: &'int LlvmInterpreter<C>,
+    ) -> Result<Module<'cxt>, Error> {
         Target::initialize_native(&InitializationConfig::default()).map_err(llvm_error)?;
         let triple = TargetMachine::get_default_triple();
         let target = Target::from_triple(&triple).map_err(llvm_error)?;
@@ -315,8 +484,8 @@ impl<'cxt, C: CellType> CodeGen<'cxt, C> {
                 &triple,
                 TargetMachine::get_host_cpu_name().to_str().unwrap(),
                 TargetMachine::get_host_cpu_features().to_str().unwrap(),
-                opt_level,
-                RelocMode::PIC,
+                OptimizationLevel::None,
+                RelocMode::Static,
                 CodeModel::JITDefault,
             )
             .ok_or(llvm_error("failed to create target machine"))?;
@@ -338,7 +507,6 @@ impl<'cxt, C: CellType> CodeGen<'cxt, C> {
             context,
             module,
             builder,
-            target_data,
             target_machine,
             void_type,
             int_type,
@@ -350,15 +518,14 @@ impl<'cxt, C: CellType> CodeGen<'cxt, C> {
         let mov = code_gen
             .create_mov_func_def(rt_extend)
             .map_err(llvm_error)?;
-        let scan = code_gen.create_scan_func_def(mov).map_err(llvm_error)?;
         code_gen
-            .compile_program(rt_input, rt_output, mov, scan)
+            .compile_program(rt_input, rt_output, mov)
             .map_err(llvm_error)?;
         #[cfg(debug_assertions)]
         code_gen.module.verify().map_err(llvm_error)?;
         let passes = if inp.opt == 0 {
             "default<O0>".to_owned()
-        } else if inp.opt == 1 {
+        } else if inp.opt <= 2 {
             let passes = [
                 "simplifycfg",
                 "break-crit-edges",
@@ -375,7 +542,7 @@ impl<'cxt, C: CellType> CodeGen<'cxt, C> {
             ];
             passes.join(",")
         } else {
-            format!("default<O{}>", (inp.opt - 1).max(3))
+            format!("default<O{}>", (inp.opt - 2).max(3))
         };
         code_gen
             .module
@@ -385,40 +552,39 @@ impl<'cxt, C: CellType> CodeGen<'cxt, C> {
                 PassBuilderOptions::create(),
             )
             .map_err(llvm_error)?;
-        Ok(code_gen)
+        Ok(code_gen.module)
     }
 }
 
 impl<C: CellType> LlvmInterpreter<C> {
     pub fn print_llvm_ir(&self) -> Result<String, Error> {
         let context = inkwell::context::Context::create();
-        let code_gen = CodeGen::create(&context, self)?;
-        Ok(code_gen.module.print_to_string().to_string())
+        let module = CodeGen::create(&context, self)?;
+        Ok(module.print_to_string().to_string())
     }
 
-    fn enter_jit_code(&self, cxt: &mut Context<C>, code_gen: &CodeGen<C>) -> Result<(), Error> {
+    fn enter_jit_code(&self, cxt: &mut Context<C>, module: Module) -> Result<(), Error> {
         let opt_level = match self.opt {
             0 => OptimizationLevel::None,
             1 => OptimizationLevel::Less,
             2 => OptimizationLevel::Default,
             _ => OptimizationLevel::Aggressive,
         };
-        let execution_engine = code_gen
-            .module
+        let execution_engine = module
             .create_jit_execution_engine(opt_level)
             .map_err(llvm_error)?;
-        if let Some(func) = code_gen.module.get_function("hpbf_context_extend") {
+        if let Some(func) = module.get_function("hpbf_context_extend") {
             execution_engine.add_global_mapping(&func, hpbf_context_extend::<C> as usize);
         }
-        if let Some(func) = code_gen.module.get_function("hpbf_context_input") {
+        if let Some(func) = module.get_function("hpbf_context_input") {
             execution_engine.add_global_mapping(&func, hpbf_context_input::<C> as usize);
         }
-        if let Some(func) = code_gen.module.get_function("hpbf_context_output") {
+        if let Some(func) = module.get_function("hpbf_context_output") {
             execution_engine.add_global_mapping(&func, hpbf_context_output::<C> as usize);
         }
         unsafe {
             let func: JitFunction<HpbfEntry<C>> = execution_engine
-                .get_function("hpbf_program_entry")
+                .get_function("hpbf_entry")
                 .map_err(llvm_error)?;
             let cxt_ptr = cxt as *mut Context<C>;
             let mem_ptr = (*cxt_ptr).memory.current_ptr();
@@ -432,12 +598,12 @@ impl<C: CellType> LlvmInterpreter<C> {
         cxt.memory
             .make_accessible(self.min_accessed, self.max_accessed);
         let context = inkwell::context::Context::create();
-        let code_gen = CodeGen::create(&context, self)?;
-        self.enter_jit_code(cxt, &code_gen)
+        let module = CodeGen::create(&context, self)?;
+        self.enter_jit_code(cxt, module)
     }
 
     /// Execute in the given context using the LLVM based JIT compiler.
-    fn execute_limited_in(&self, cxt: &mut Context<C>, budget: usize) -> Result<bool, Error> {
+    fn execute_limited_in(&self, _cxt: &mut Context<C>, _budget: usize) -> Result<bool, Error> {
         todo!()
     }
 }
