@@ -613,14 +613,14 @@ unsafe fn limit<C: CellType>(
     r1: C,
 ) -> *const OpCode<C> {
     let cost = (*ip.add(1)).idx;
-    if (*cxt).budget <= cost {
-        (*cxt).budget = 0;
+    if (*cxt).context.budget <= cost {
+        (*cxt).context.budget = 0;
         temps_ptr(cxt).add(0).write(r0);
         temps_ptr(cxt).add(1).write(r1);
         (*cxt).context.memory.set_current_ptr(mem);
         ip.add(2)
     } else {
-        (*cxt).budget -= cost;
+        (*cxt).context.budget -= cost;
         noop(cxt, mem, ip.add(1), r0, r1)
     }
 }

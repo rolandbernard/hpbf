@@ -26,6 +26,7 @@ pub struct Context<'a, C: CellType> {
     // Do not change the order or position of the three first fields. They are
     // used by the code generated in the jit compiler.
     pub memory: Memory<C>,
+    pub budget: usize,
     input: Option<Box<dyn Read + 'a>>,
     output: Option<Box<dyn Write + 'a>>,
 }
@@ -153,6 +154,7 @@ impl<'a, C: CellType> Context<'a, C> {
     pub fn new(input: Option<Box<dyn Read + 'a>>, output: Option<Box<dyn Write + 'a>>) -> Self {
         Context {
             memory: Memory::new(),
+            budget: 0,
             input,
             output,
         }

@@ -42,7 +42,6 @@ pub struct BcInterpreter<C: CellType> {
 pub struct OpsContext<'cxt, C: CellType> {
     min_accessed: isize,
     max_accessed: isize,
-    budget: usize,
     context: Context<'cxt, C>,
     temps: [C; 0],
 }
@@ -95,8 +94,8 @@ impl<C: CellType> BcInterpreter<C> {
             let ptr = alloc_zeroed(layout) as *mut OpsContext<C>;
             ptr::addr_of_mut!((*ptr).min_accessed).write(self.bytecode.min_accessed);
             ptr::addr_of_mut!((*ptr).max_accessed).write(self.bytecode.max_accessed);
-            ptr::addr_of_mut!((*ptr).budget).write(budget);
             ptr::addr_of_mut!((*ptr).context).write(cxt);
+            ptr::addr_of_mut!((*ptr).context.budget).write(budget);
             ptr
         }
     }
@@ -141,7 +140,7 @@ impl<C: CellType> BcInterpreter<C> {
         while !ip.is_null() {
             // Safety: We rely on the threaded code being generated correctly.
             unsafe {
-                if (*ops_cxt).budget == 0 {
+                if (*ops_cxt).context.budget == 0 {
                     finished = false;
                     break;
                 }

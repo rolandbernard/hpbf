@@ -112,7 +112,7 @@ fn execute_code<C: CellType>(
         #[cfg(feature = "llvm")]
         ExecutorKind::PrintLlvm => {
             let int = LlvmInterpreter::<C>::create(code, opt)?;
-            println!("{}", int.print_llvm_ir()?);
+            println!("{}", int.print_llvm_ir(limit.is_some())?);
             exec = None;
         }
         #[cfg(feature = "llvm")]
