@@ -37,7 +37,7 @@ use super::{Executable, Executor};
 /// # assert_eq!(String::from_utf8(buf).unwrap(), "H");
 /// # Ok::<(), Error>(())
 /// ```
-pub struct LlvmInterpreter<C: CellType> {
+pub struct LlvmJitCompiler<C: CellType> {
     program: Program<C>,
     min_accessed: isize,
     max_accessed: isize,
@@ -49,7 +49,7 @@ type HpbfEntry<'a, C> = unsafe extern "C" fn(cxt: *mut Context<'a, C>) -> *mut C
 
 /// Struct holding information needed during LLVM IR generation.
 struct CodeGen<'cxt, 'int: 'cxt, C: CellType> {
-    inp: &'int LlvmInterpreter<C>,
+    inp: &'int LlvmJitCompiler<C>,
     has_budget: bool,
     context: &'cxt inkwell::context::Context,
     module: Module<'cxt>,
@@ -636,7 +636,7 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
     /// Compile the given bytecode program to an LLVM module and perform optimizations.
     fn create(
         context: &'cxt inkwell::context::Context,
-        inp: &'int LlvmInterpreter<C>,
+        inp: &'int LlvmJitCompiler<C>,
         has_budget: bool,
     ) -> Result<Module<'cxt>, Error> {
         Target::initialize_native(&InitializationConfig::default()).map_err(llvm_error)?;
@@ -744,7 +744,7 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
     }
 }
 
-impl<C: CellType> LlvmInterpreter<C> {
+impl<C: CellType> LlvmJitCompiler<C> {
     /// Print the LLVM IR to a string and return that.
     pub fn print_llvm_ir(&self, limit: bool) -> Result<String, Error> {
         let context = inkwell::context::Context::create();
@@ -801,12 +801,12 @@ impl<C: CellType> LlvmInterpreter<C> {
     }
 }
 
-impl<'p, C: CellType> Executor<'p, C> for LlvmInterpreter<C> {
+impl<'p, C: CellType> Executor<'p, C> for LlvmJitCompiler<C> {
     fn create(code: &str, opt: u32) -> Result<Self, Error> {
         let mut program = Program::<C>::parse(code)?;
         program = program.optimize(opt);
         let (min_accessed, max_accessed) = program.compute_min_max_accessed();
-        Ok(LlvmInterpreter {
+        Ok(LlvmJitCompiler {
             program,
             opt,
             min_accessed,
@@ -815,7 +815,7 @@ impl<'p, C: CellType> Executor<'p, C> for LlvmInterpreter<C> {
     }
 }
 
-impl<C: CellType> Executable<C> for LlvmInterpreter<C> {
+impl<C: CellType> Executable<C> for LlvmJitCompiler<C> {
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error> {
         self.execute_in(context)
     }
@@ -845,5 +845,5 @@ extern "C" fn hpbf_context_output<C: CellType>(cxt: &mut Context<'static, u8>, v
     cxt.output(value.into_u8()).is_none()
 }
 
-executor_tests!(LlvmInterpreter);
-same_as_inplace_tests!(LlvmInterpreter);
+executor_tests!(LlvmJitCompiler);
+same_as_inplace_tests!(LlvmJitCompiler);

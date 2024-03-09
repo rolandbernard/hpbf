@@ -265,7 +265,7 @@ impl<C: CellType> CodeGen<C> {
 
     /// Emit the instructions for the inside of the given block. This does not
     /// include the move instruction of the block.
-    fn emit_block(&mut self, block: &Block<C>, anal: &Analysis) {
+    fn emit_block(&mut self, block: &Block<C>, anal: &Analysis, fuse: bool) {
         let mut block_idx = 0;
         let prev_start = self.current_start;
         for inst in &block.insts {
@@ -305,7 +305,7 @@ impl<C: CellType> CodeGen<C> {
                     }
                     let prev_exprs = self.exprs.len();
                     let num_outer = self.outer_accessed.len();
-                    if !is_loop || !block.insts.is_empty() {
+                    if !fuse || !is_loop || !block.insts.is_empty() {
                         if !at_least_once {
                             self.insts.push(Instr::Noop);
                         }
@@ -313,7 +313,7 @@ impl<C: CellType> CodeGen<C> {
                         if is_loop {
                             self.current_start = start_instr;
                         }
-                        self.emit_block(block, sub_anal);
+                        self.emit_block(block, sub_anal, fuse);
                         if block.shift != 0 {
                             self.insts.push(Instr::Mov(block.shift))
                         }
@@ -472,7 +472,7 @@ impl<C: CellType> CodeGen<C> {
                 | Instr::Mul(Loc::Tmp(tmp), _, _)
                 | Instr::Copy(Loc::Tmp(tmp), _) => {
                     let live = self.ranges[tmp].last_use.unwrap() - i;
-                    (live < 16 || free_regs.len() > 4)
+                    (live < 16 || free_regs.len() > 2)
                         && (!free_regs.is_empty() || about_to_free.iter().any(|&x| x < num_regs))
                 }
                 _ => false,
@@ -567,7 +567,7 @@ impl<C: CellType> CodeGen<C> {
                         let last_use = self.ranges[*old].last_use.unwrap();
                         let live = last_use - i;
                         let mut tmp = None;
-                        if live < 16 || free_regs.len() > 4 {
+                        if live < 16 || free_regs.len() > 2 {
                             // Don't allocate registers to temps with long live ranges.
                             // Allow registers if there is not a lot of pressure.
                             tmp = free_regs.pop();
@@ -782,7 +782,7 @@ impl<C: CellType> CodeGen<C> {
             current_start: 0,
             outer_accessed: Vec::new(),
         };
-        codegen.emit_block(program, &analysis);
+        codegen.emit_block(program, &analysis, fuse);
         codegen.dead_store_elim();
         codegen.allocate_temps(num_regs);
         codegen.parameter_reordering();
