@@ -17,6 +17,7 @@ use hpbf::exec::LlvmInterpreter;
 enum ExecutorKind {
     PrintIr,
     PrintBc,
+    PrintBc2,
     Inplace,
     IrInt,
     BcInt,
@@ -41,6 +42,7 @@ fn print_help_text() {
     println!("   -i64             Run the code using a cell size of 64 bit");
     println!("   --print-ir       Print ir code to stdout and do not execute");
     println!("   --print-bc       Print byte code to stdout and do not execute");
+    println!("   --print-jit-bc   Print byte code used in the JIT to stdout and do not execute");
     #[cfg(feature = "llvm")]
     println!("   --print-llvm     Print LLVM IR code to stdout and do not execute");
     println!("   --inplace        Use the inplace non-optimizing interpreter");
@@ -96,7 +98,14 @@ fn execute_code<C: CellType>(
         ExecutorKind::PrintBc => {
             let program = ir::Program::<C>::parse(code)?;
             let program = program.optimize(opt);
-            let bytecode = bc::CodeGen::translate(&program, 2);
+            let bytecode = bc::CodeGen::translate(&program, 2, true);
+            println!("{bytecode:?}");
+            exec = None;
+        }
+        ExecutorKind::PrintBc2 => {
+            let program = ir::Program::<C>::parse(code)?;
+            let program = program.optimize(opt);
+            let bytecode = bc::CodeGen::translate(&program, 12, false);
             println!("{bytecode:?}");
             exec = None;
         }
@@ -174,6 +183,7 @@ fn main() {
             match arg.as_str() {
                 "--print-ir" => kind = ExecutorKind::PrintIr,
                 "--print-bc" => kind = ExecutorKind::PrintBc,
+                "--print-jit-bc" => kind = ExecutorKind::PrintBc2,
                 "--inplace" => kind = ExecutorKind::Inplace,
                 "--ir-int" => kind = ExecutorKind::IrInt,
                 "--bc-int" => kind = ExecutorKind::BcInt,

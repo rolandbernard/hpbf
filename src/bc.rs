@@ -41,9 +41,18 @@ pub enum Instr<C: CellType> {
 /// Represents a bytecode program. Includes, in addition to the instructions,
 /// also the number of necessary temporaries.
 pub struct Program<C: CellType> {
+    /// Indicates the number of temporaries necessary. The instructions will only
+    /// access temporaries inside the range `0..temps`.
     pub temps: usize,
+    /// Minimum memory index accessed.
     pub min_accessed: isize,
+    /// Maximum memory index accessed.
     pub max_accessed: isize,
+    /// Bitmaps for which of the (first 16) registers are live through the instruction.
+    /// This includes only those for which the value from before the instruction has to
+    /// be preserved, not necessarily all the ones used or written.
+    pub live: Vec<u16>,
+    /// Instructions in the program.
     pub insts: Vec<Instr<C>>,
 }
 
@@ -83,6 +92,7 @@ pub struct CodeGen<C: CellType> {
     exprs: Vec<GvnExpr<C>>,
     values: HashMap<GvnExpr<C>, usize>,
     insts: Vec<Instr<C>>,
+    live: Vec<u16>,
     current_start: usize,
     outer_accessed: Vec<usize>,
 }
@@ -462,7 +472,7 @@ impl<C: CellType> CodeGen<C> {
                 | Instr::Mul(Loc::Tmp(tmp), _, _)
                 | Instr::Copy(Loc::Tmp(tmp), _) => {
                     let live = self.ranges[tmp].last_use.unwrap() - i;
-                    live < 16
+                    (live < 16 || free_regs.len() > 4)
                         && (!free_regs.is_empty() || about_to_free.iter().any(|&x| x < num_regs))
                 }
                 _ => false,
@@ -537,6 +547,16 @@ impl<C: CellType> CodeGen<C> {
                     }
                 }
             }
+            let mut live = 1u16
+                .checked_shl(num_regs as u32)
+                .unwrap_or(0)
+                .wrapping_sub(1);
+            for &Reverse(var) in &free_regs {
+                if var < 16 {
+                    live -= 1 << var;
+                }
+            }
+            self.live.push(live);
             let mut alloc_temp = |instr: &mut Instr<C>| {
                 if let Instr::Add(dst, _, _)
                 | Instr::Sub(dst, _, _)
@@ -547,8 +567,9 @@ impl<C: CellType> CodeGen<C> {
                         let last_use = self.ranges[*old].last_use.unwrap();
                         let live = last_use - i;
                         let mut tmp = None;
-                        if live < 16 {
+                        if live < 16 || free_regs.len() > 4 {
                             // Don't allocate registers to temps with long live ranges.
+                            // Allow registers if there is not a lot of pressure.
                             tmp = free_regs.pop();
                         }
                         if tmp.is_none() {
@@ -710,6 +731,11 @@ impl<C: CellType> CodeGen<C> {
                 *off -= cum_noop[target] - cum_noop[i];
             }
         }
+        let mut idx = 0;
+        self.live.retain(|_| {
+            idx += 1;
+            !matches!(self.insts[idx - 1], Instr::Noop)
+        });
         self.insts.retain(|inst| !matches!(inst, Instr::Noop));
     }
 
@@ -737,8 +763,12 @@ impl<C: CellType> CodeGen<C> {
             .unwrap_or(0)
     }
 
-    /// Translate the IR program into an BC program.
-    pub fn translate(program: &ir::Program<C>, num_regs: usize) -> Program<C> {
+    /// Translate the IR program into an BC program. Indicate the number of "fast"
+    /// registers by `num_regs` and whether instruction fusion should be performed
+    /// with `fuse`. The number of registers is used to determine whether using a
+    /// temporary should be preferred over using a memory location. If instruction
+    /// fusion is disabled, no [`Loc::MemZero`] locations will be generated.
+    pub fn translate(program: &ir::Program<C>, num_regs: usize, fuse: bool) -> Program<C> {
         let analysis = Analysis::analyze(program);
         let mut codegen = CodeGen {
             min_accessed: analysis.min_accessed,
@@ -748,6 +778,7 @@ impl<C: CellType> CodeGen<C> {
             exprs: Vec::new(),
             values: HashMap::new(),
             insts: Vec::new(),
+            live: Vec::new(),
             current_start: 0,
             outer_accessed: Vec::new(),
         };
@@ -755,7 +786,9 @@ impl<C: CellType> CodeGen<C> {
         codegen.dead_store_elim();
         codegen.allocate_temps(num_regs);
         codegen.parameter_reordering();
-        codegen.zeroing_move_detection();
+        if fuse {
+            codegen.zeroing_move_detection();
+        }
         codegen.strip_noops();
         let temp_size = codegen.count_temps();
         Program {
@@ -763,6 +796,7 @@ impl<C: CellType> CodeGen<C> {
             min_accessed: codegen.min_accessed,
             max_accessed: codegen.max_accessed,
             insts: codegen.insts,
+            live: codegen.live,
         }
     }
 }
@@ -796,13 +830,13 @@ impl<C: CellType> Instr<C> {
             Instr::Add(_, src0, src1) | Instr::Sub(_, src0, src1) | Instr::Mul(_, src0, src1) => {
                 for src in [src0, src1] {
                     if let Loc::MemZero(mem) = src {
-                        write!(f, "; copy [{mem}], 0")?;
+                        write!(f, " & copy [{mem}], 0")?;
                     }
                 }
             }
             Instr::Copy(_, src) => {
                 if let Loc::MemZero(mem) = src {
-                    write!(f, "; copy [{mem}], 0")?;
+                    write!(f, " & copy [{mem}], 0")?;
                 }
             }
             _ => { /* These have no locations. */ }
@@ -834,6 +868,15 @@ impl<C: CellType> Debug for Program<C> {
             }
             write!(f, "  ")?;
             instr.fmt_at(f, i)?;
+            let mut live = self.live[i];
+            if live != 0 {
+                write!(f, "  ;")?;
+                while live != 0 {
+                    let l = live.trailing_zeros();
+                    write!(f, " %{l}")?;
+                    live -= 1 << l;
+                }
+            }
             writeln!(f)?;
         }
         if branch_target.contains(&self.insts.len()) {

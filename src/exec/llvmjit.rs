@@ -45,7 +45,7 @@ pub struct LlvmInterpreter<C: CellType> {
 }
 
 /// Function type of the generated JIT function.
-type HpbfEntry<'a, C> = unsafe extern "C" fn(cxt: *mut Context<'a, C>, mem: *mut C) -> *mut C;
+type HpbfEntry<'a, C> = unsafe extern "C" fn(cxt: *mut Context<'a, C>) -> *mut C;
 
 /// Struct holding information needed during LLVM IR generation.
 struct CodeGen<'cxt, 'int: 'cxt, C: CellType> {
@@ -780,8 +780,7 @@ impl<C: CellType> LlvmInterpreter<C> {
                 .get_function("hpbf_entry")
                 .map_err(llvm_error)?;
             let cxt_ptr = cxt as *mut Context<C>;
-            let mem_ptr = (*cxt_ptr).memory.current_ptr();
-            func.call(cxt_ptr, mem_ptr)
+            func.call(cxt_ptr)
         };
         Ok(!ret_mem.is_null())
     }

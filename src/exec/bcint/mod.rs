@@ -19,7 +19,7 @@ use super::{Executable, Executor};
 mod ops;
 
 /// A basic interpreter that does some limited optimizing transformations of the
-/// program and executes the result using a loop-and-switch interpreter.
+/// program and executes the result using a translation to direct threaded code.
 ///
 /// # Examples
 /// ```
@@ -154,7 +154,7 @@ impl<'code, C: CellType> Executor<'code, C> for BcInterpreter<C> {
     fn create(code: &str, opt: u32) -> Result<Self, Error> {
         let mut program = ir::Program::<C>::parse(code)?;
         program = program.optimize(opt);
-        let bytecode = bc::CodeGen::translate(&program, 2);
+        let bytecode = bc::CodeGen::translate(&program, 2, true);
         Ok(BcInterpreter { bytecode })
     }
 }
