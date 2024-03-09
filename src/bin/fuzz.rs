@@ -60,7 +60,7 @@ fn result_with<'code, C: CellType, E: Executor<'code, C>>(
     let mut output = Vec::new();
     let mut context = Context::new(Some(Box::new(&input[..])), Some(Box::new(&mut output)));
     let exec = E::create(code, opt).unwrap();
-    let finished = exec.execute_limited(&mut context, 50_000).unwrap();
+    let finished = exec.execute_limited(&mut context, 1_000).unwrap();
     drop(context);
     return (finished, output);
 }

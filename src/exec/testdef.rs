@@ -135,30 +135,37 @@ macro_rules! same_as_inplace_test_inner {
         for i in 0..1024 {
             input.push((183 * i) as u8);
         }
-        let mut out_inplace = input.clone();
+        let mut out_inplace = if $l { Vec::new() } else { input.clone() };
         let mut ctx_inplace = Context::<u8>::new(
             Some(Box::new(&input[..])),
-            Some(Box::new(&mut out_inplace[..])),
+            Some(if $l {
+                Box::new(&mut out_inplace)
+            } else {
+                Box::new(&mut out_inplace[..])
+            }),
         );
         let finished_inplace;
         if $l {
             finished_inplace = InplaceInterpreter::<u8>::create(code, 0)?
-                .execute_limited(&mut ctx_inplace, 50_000)?;
+                .execute_limited(&mut ctx_inplace, 1_000)?;
         } else {
             InplaceInterpreter::<u8>::create(code, 0)?.execute(&mut ctx_inplace)?;
             finished_inplace = true;
         }
         drop(ctx_inplace);
         for opt in 0..3 {
-            let mut out_to_test = input.clone();
+            let mut out_to_test = if $l { Vec::new() } else { input.clone() };
             let mut ctx_to_test = Context::<u8>::new(
                 Some(Box::new(&input[..])),
-                Some(Box::new(&mut out_to_test[..])),
+                Some(if $l {
+                    Box::new(&mut out_to_test)
+                } else {
+                    Box::new(&mut out_to_test[..])
+                }),
             );
             let finished;
             if $l {
-                finished =
-                    $i::<u8>::create(code, opt)?.execute_limited(&mut ctx_to_test, 50_000)?;
+                finished = $i::<u8>::create(code, opt)?.execute_limited(&mut ctx_to_test, 1_000)?;
             } else {
                 $i::<u8>::create(code, opt)?.execute(&mut ctx_to_test)?;
                 finished = true;
@@ -321,17 +328,17 @@ macro_rules! same_as_inplace_tests {
                 "[[---]+][-]+.",
                 values_from_loop_that_maybe_runs
             );
+            same_as_inplace_test!(
+                $i,
+                "...,,[[>,.<]]",
+                infinite_loop_inside_other_loop
+            );
 
-            // These do not terminate normally.
+            // These do not terminate and do not produce infinite output.
             same_as_inplace_test_limited!(
                 $i,
                 "+>><<[.>-[]]",
                 empty_infinite_loop_inside_other_loop
-            );
-            same_as_inplace_test_limited!(
-                $i,
-                "...,,[[>,.<]]",
-                infinite_loop_inside_other_loop
             );
 
             // Manually created test cases.

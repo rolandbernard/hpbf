@@ -49,17 +49,14 @@ pub struct OpsContext<'cxt, C: CellType> {
 impl<C: CellType> BcInterpreter<C> {
     /// Generate, from the bytecode, the corresponding threaded code.
     fn build_threaded_code(&self, limited: bool) -> Vec<OpCode<C>> {
-        let mut cost = 0;
         let mut inst_offset = Vec::with_capacity(self.bytecode.insts.len() + 1);
         let mut inst_start = Vec::with_capacity(self.bytecode.insts.len() + 1);
         let mut insts = Vec::new();
         for &inst in &self.bytecode.insts {
-            cost += 1;
             inst_start.push(insts.len());
             if limited {
                 if let Instr::BrZ(_, _) | Instr::BrNZ(_, _) = inst {
-                    emit_limit(&mut insts, cost);
-                    cost = 0;
+                    emit_limit(&mut insts, 1);
                 }
                 if let Instr::Scan(_, shift) = inst {
                     if shift == 0 {

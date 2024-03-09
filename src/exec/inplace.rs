@@ -32,12 +32,6 @@ impl<'code, C: CellType> InplaceInterpreter<'code, C> {
         let mut loop_stack = Vec::new();
         let mut pc = 0;
         while pc < code_bytes.len() {
-            if let Some(lim) = limit {
-                if lim == 0 {
-                    return Ok(false);
-                }
-                limit = Some(lim - 1);
-            }
             let code = code_bytes[pc];
             pc += 1;
             match code {
@@ -86,6 +80,12 @@ impl<'code, C: CellType> InplaceInterpreter<'code, C> {
                     }
                 }
                 b']' => {
+                    if let Some(lim) = limit {
+                        if lim == 0 {
+                            return Ok(false);
+                        }
+                        limit = Some(lim - 1);
+                    }
                     let target = loop_stack.pop().ok_or(Error {
                         kind: ErrorKind::LoopNotOpened,
                         str: self.code.to_owned(),

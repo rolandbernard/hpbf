@@ -24,6 +24,19 @@ use crate::{
 use super::{Executable, Executor};
 
 /// A LLVM backed JIT compiler. Builds LLVM IR from the internal brainfuck IR.
+///
+/// # Examples
+/// ```
+/// # use hpbf::{ir::{Program, Block, Instr}, Error, runtime::Context, exec::{Executor, Executable, LlvmInterpreter}};
+/// # let mut buf = Vec::new();
+/// # let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
+/// # let code = "++++++[>+++++<-]>++[>++<-]++++[>++<-]>[.>]";
+/// let exec = LlvmInterpreter::<u8>::create(code, 1)?;
+/// exec.execute(&mut ctx)?;
+/// # drop(ctx);
+/// # assert_eq!(String::from_utf8(buf).unwrap(), "H");
+/// # Ok::<(), Error>(())
+/// ```
 pub struct LlvmInterpreter<C: CellType> {
     program: Program<C>,
     min_accessed: isize,
@@ -50,6 +63,7 @@ struct CodeGen<'cxt, 'int: 'cxt, C: CellType> {
     blocks: HashMap<&'int Block<C>, FunctionValue<'cxt>>,
 }
 
+/// Generates LLVM values from the IR expressions.
 struct LlvmCodeGenCalc<'a, 'cxt, 'int, C: CellType> {
     codegen: &'a CodeGen<'cxt, 'int, C>,
     mem_ptr: PointerValue<'cxt>,
@@ -99,6 +113,8 @@ impl<'a, 'b: 'c, 'c, C: CellType> ir::CodeGen<C> for LlvmCodeGenCalc<'a, 'b, 'c,
 }
 
 impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
+    /// Apply the function attributes to the runtime functions. Runtime functions
+    /// will always be marked cold, will always return, not capture the pointer, etc.
     fn apply_runtime_func_attributes(&self, func: &FunctionValue<'cxt>, read_none: bool) {
         let readnone_kind = Attribute::get_named_enum_kind_id("readnone");
         let nocapture_kind = Attribute::get_named_enum_kind_id("nocapture");
@@ -145,6 +161,7 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
         );
     }
 
+    /// Create the function declaration for the three runtime functions.
     fn create_runtime_func_decl(
         &self,
     ) -> (
@@ -182,6 +199,8 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
         (runtime_extend, runtime_input, runtime_output)
     }
 
+    /// Build a pointer to an offset from the base pointer. This is the only use of
+    /// the getElementPointer instruction in this backend (excluding struct GEPs).
     fn build_load_pointer(
         &self,
         base: PointerValue<'cxt>,
@@ -199,6 +218,8 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
         }
     }
 
+    /// Create the definition of mov function. This function moves the memory pointer,
+    /// performs bounds checking and returns the new pointer.
     fn create_mov_func_def(
         &self,
         rt_extend: FunctionValue<'cxt>,
@@ -283,6 +304,7 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
         Ok(mov)
     }
 
+    /// Compile the given IR block. Returns the LLVM value for the new memory pointer.
     fn compile_block(
         &mut self,
         rt_input: FunctionValue<'cxt>,
@@ -484,8 +506,7 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
                 .into_int_value();
             let budget = self.builder.build_int_sub(
                 budget,
-                self.intptr_type
-                    .const_int(block.insts.len() as u64 + 1, false),
+                self.intptr_type.const_int(1, false),
                 "budget",
             )?;
             self.builder.build_store(budget_ptr, budget)?;
@@ -527,6 +548,8 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
         Ok(mem_ptr)
     }
 
+    /// Create the function definition for the given block. All blocks are compiled
+    /// to functions that take the context and returns the new memory pointer.
     fn create_block_func_def(
         &mut self,
         rt_input: FunctionValue<'cxt>,
@@ -568,6 +591,9 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
         Ok(func)
     }
 
+    /// Compile the complete input program and define the entry function. The entry
+    /// function takes the context pointer as input and returns either the new
+    /// memory pointer or null if the program has been interrupted.
     fn compile_program(
         &mut self,
         rt_input: FunctionValue<'cxt>,
@@ -607,6 +633,7 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
         Ok(())
     }
 
+    /// Compile the given bytecode program to an LLVM module and perform optimizations.
     fn create(
         context: &'cxt inkwell::context::Context,
         inp: &'int LlvmInterpreter<C>,
@@ -668,7 +695,7 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
         code_gen.module.verify().map_err(llvm_error)?;
         let passes = if inp.opt == 0 {
             "default<O0>".to_owned()
-        } else if inp.opt <= 1 {
+        } else if inp.opt <= 2 {
             let passes = [
                 "module(",
                 "cgscc(",
@@ -680,7 +707,7 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
                 ")))",
             ];
             passes.join("")
-        } else if inp.opt <= 2 {
+        } else if inp.opt <= 3 {
             let passes = [
                 "module(",
                 "cgscc(",
@@ -703,7 +730,7 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
             ];
             passes.join("")
         } else {
-            format!("default<O{}>", (inp.opt - 2).max(3))
+            format!("default<O{}>", (inp.opt - 3).max(3))
         };
         code_gen
             .module
@@ -718,12 +745,15 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
 }
 
 impl<C: CellType> LlvmInterpreter<C> {
+    /// Print the LLVM IR to a string and return that.
     pub fn print_llvm_ir(&self, limit: bool) -> Result<String, Error> {
         let context = inkwell::context::Context::create();
         let module = CodeGen::create(&context, self, limit)?;
         Ok(module.print_to_string().to_string())
     }
 
+    /// JIT compile the LLVM module and enter with the entry function. Returns true
+    /// if the program finished normally, and false if it was interrupted.
     fn enter_jit_code(&self, cxt: &mut Context<C>, module: Module) -> Result<bool, Error> {
         let opt_level = match self.opt {
             0 => OptimizationLevel::None,
@@ -796,6 +826,8 @@ impl<C: CellType> Executable<C> for LlvmInterpreter<C> {
     }
 }
 
+/// Runtime function. Extends the memory buffer and moves the offset to make the range
+/// from `min` (inclusive) to `max` (exclusive) accessible.
 extern "C" fn hpbf_context_extend<C: CellType>(
     cxt: &mut Context<'static, C>,
     min: isize,
@@ -804,10 +836,12 @@ extern "C" fn hpbf_context_extend<C: CellType>(
     cxt.memory.make_accessible(min, max);
 }
 
+/// Runtime function. Get a value form the input, or zero in case the input closed.
 extern "C" fn hpbf_context_input<C: CellType>(cxt: &mut Context<'static, C>) -> C {
     C::from_u8(cxt.input().unwrap_or(0))
 }
 
+/// Runtime function. Print the given value to the output and return true if the output closed.
 extern "C" fn hpbf_context_output<C: CellType>(cxt: &mut Context<'static, u8>, value: C) -> bool {
     cxt.output(value.into_u8()).is_none()
 }

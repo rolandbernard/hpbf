@@ -38,12 +38,6 @@ impl<C: CellType> IrInterpreter<C> {
         limit: &mut Option<usize>,
     ) -> Option<bool> {
         for instr in &block.insts {
-            if let Some(lim) = limit {
-                if *lim == 0 {
-                    return Some(false);
-                }
-                *lim -= 1;
-            }
             match instr {
                 Instr::Output { src } => {
                     cxt.output(cxt.memory.read(*src).into_u8())?;
