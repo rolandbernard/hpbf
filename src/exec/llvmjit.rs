@@ -27,11 +27,11 @@ use super::{Executable, Executor};
 ///
 /// # Examples
 /// ```
-/// # use hpbf::{ir::{Program, Block, Instr}, Error, runtime::Context, exec::{Executor, Executable, LlvmInterpreter}};
+/// # use hpbf::{ir::{Program, Block, Instr}, Error, runtime::Context, exec::{Executor, Executable, LlvmJitCompiler}};
 /// # let mut buf = Vec::new();
 /// # let mut ctx = Context::<u8>::new(None, Some(Box::new(&mut buf)));
 /// # let code = "++++++[>+++++<-]>++[>++<-]++++[>++<-]>[.>]";
-/// let exec = LlvmInterpreter::<u8>::create(code, 1)?;
+/// let exec = LlvmJitCompiler::<u8>::create(code, 1)?;
 /// exec.execute(&mut ctx)?;
 /// # drop(ctx);
 /// # assert_eq!(String::from_utf8(buf).unwrap(), "H");

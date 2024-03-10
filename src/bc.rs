@@ -637,6 +637,27 @@ impl<C: CellType> CodeGen<C> {
     /// Further, this pass tries to put immediate as the last parameter.
     fn parameter_reordering(&mut self) {
         for i in (0..self.insts.len()).rev() {
+            match self.insts[i] {
+                Instr::Add(dst, Loc::Imm(imm0), Loc::Imm(imm1)) => {
+                    self.insts[i] = Instr::Copy(dst, Loc::Imm(imm0.wrapping_add(imm1)));
+                }
+                Instr::Sub(dst, Loc::Imm(imm0), Loc::Imm(imm1)) => {
+                    self.insts[i] =
+                        Instr::Copy(dst, Loc::Imm(imm0.wrapping_add(imm1.wrapping_neg())));
+                }
+                Instr::Mul(dst, Loc::Imm(imm0), Loc::Imm(imm1)) => {
+                    self.insts[i] = Instr::Copy(dst, Loc::Imm(imm0.wrapping_mul(imm1)));
+                }
+                _ => { /* Handled below. */ }
+            }
+            match self.insts[i] {
+                Instr::Sub(dst, src0, src1) => {
+                    if let Loc::Imm(imm) = src1 {
+                        self.insts[i] = Instr::Add(dst, src0, Loc::Imm(imm.wrapping_neg()));
+                    }
+                }
+                _ => { /* Handled below. */ }
+            }
             match &mut self.insts[i] {
                 Instr::Add(dst, src0, src1) | Instr::Mul(dst, src0, src1) => {
                     if let Loc::Tmp(tmp0) = src0 {
