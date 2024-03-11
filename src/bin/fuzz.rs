@@ -10,7 +10,7 @@ use std::{
 };
 
 use hpbf::{
-    exec::{BcInterpreter, Executor, InplaceInterpreter, IrInterpreter},
+    exec::{BaseJitCompiler, BcInterpreter, Executor, InplaceInterpreter, IrInterpreter},
     runtime::Context,
     CellType,
 };
@@ -89,35 +89,42 @@ fn compare_results(a: &(bool, Vec<u8>), b: &(bool, Vec<u8>)) -> bool {
 
 /// Check the code by executing it with different executors. Tests that the output
 /// of all the executors is identical.
-fn check_code<'code>(code: &'code str) -> bool {
-    let inplace = result_with::<u8, InplaceInterpreter<'code, u8>>(code, 0);
-    let irint0 = result_with::<u8, IrInterpreter<u8>>(code, 0);
+fn check_code<'code, C: CellType>(code: &'code str) -> bool {
+    let inplace = result_with::<C, InplaceInterpreter<'code, C>>(code, 0);
+    let irint0 = result_with::<C, IrInterpreter<C>>(code, 0);
     if !compare_results(&inplace, &irint0) {
         return false;
     }
-    let irint1 = result_with::<u8, IrInterpreter<u8>>(code, 1);
+    let irint1 = result_with::<C, IrInterpreter<C>>(code, 1);
     if !compare_results(&inplace, &irint1) || !compare_results(&irint0, &irint1) {
         return false;
     }
-    let irint2 = result_with::<u8, IrInterpreter<u8>>(code, 4);
+    let irint2 = result_with::<C, IrInterpreter<C>>(code, 4);
     if !compare_results(&inplace, &irint2) || !compare_results(&irint1, &irint2) {
         return false;
     }
-    let bcint0 = result_with::<u8, BcInterpreter<u8>>(code, 0);
+    let bcint0 = result_with::<C, BcInterpreter<C>>(code, 0);
     if !compare_results(&inplace, &bcint0) || !compare_results(&irint2, &bcint0) {
         return false;
     }
-    let bcint1 = result_with::<u8, BcInterpreter<u8>>(code, 1);
+    let bcint1 = result_with::<C, BcInterpreter<C>>(code, 1);
     if !compare_results(&inplace, &bcint1)
         || !compare_results(&irint2, &bcint1)
         || !compare_results(&bcint0, &bcint1)
     {
         return false;
     }
-    let bcint2 = result_with::<u8, BcInterpreter<u8>>(code, 4);
+    let bcint2 = result_with::<C, BcInterpreter<C>>(code, 4);
     if !compare_results(&inplace, &bcint2)
         || !compare_results(&irint2, &bcint2)
         || !compare_results(&bcint1, &bcint2)
+    {
+        return false;
+    }
+    let bcjit2 = result_with::<C, BaseJitCompiler<C>>(code, 4);
+    if !compare_results(&inplace, &bcjit2)
+        || !compare_results(&irint2, &bcjit2)
+        || !compare_results(&bcint2, &bcjit2)
     {
         return false;
     }
@@ -174,7 +181,7 @@ fn minimize_code(hasher: &mut impl Hasher, code: String) -> String {
         } else {
             next = code[..i].to_owned() + &code[i + 1..];
         }
-        if !check_code(&next) {
+        if !check_code::<u8>(&next) {
             return minimize_code(hasher, next);
         }
     }
@@ -253,7 +260,7 @@ fn main() {
         for file in fs::read_dir(dir).unwrap() {
             let file = file.unwrap().path();
             let code = fs::read_to_string(&file).unwrap();
-            if check_code(&code) {
+            if check_code::<u8>(&code) {
                 success += 1;
                 fs::remove_file(file).unwrap();
             } else {
@@ -276,7 +283,7 @@ fn main() {
             for i in 0..100_000 {
                 hasher.write_usize(i);
                 let code = generate_code(&mut hasher, max_len);
-                if check_code(&code) {
+                if check_code::<u8>(&code) {
                     success += 1;
                 } else {
                     failure += 1;

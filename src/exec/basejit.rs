@@ -123,7 +123,9 @@ impl CodeGen {
                         + (base.unwrap_or(Reg::Rax) as u8 >> 3)
                 }
             };
-        if byte != 0x40 {
+        if byte != 0x40
+            || reg.is_some_and(|r| [Reg::Rsp, Reg::Rbp, Reg::Rsi, Reg::Rdi].contains(&r))
+        {
             self.code.push(byte);
         }
     }
@@ -515,10 +517,11 @@ impl CodeGen {
 
 impl CodeGen {
     fn emit_prologue(&mut self, temps: usize) {
-        for reg in [Reg::Rbx, Reg::Rbp, Reg::R12, Reg::R13, Reg::R14, Reg::R15] {
+        for reg in [Reg::Rbp, Reg::Rbx, Reg::R12, Reg::R13, Reg::R14, Reg::R15] {
             self.emit_push_r64(reg);
         }
-        self.emit_sub_rm64_i32(RegMem::Reg(Reg::Rsp), (temps * 8) as i32);
+        let aligned = if temps % 2 == 0 { temps + 1 } else { temps };
+        self.emit_sub_rm64_i32(RegMem::Reg(Reg::Rsp), (aligned * 8) as i32);
         self.emit_mov_r64_rm64(Reg::cxt(), RegMem::Reg(Reg::Rdi));
         self.emit_mov_r64_rm64(Reg::mem(), RegMem::Reg(Reg::Rsi));
     }
@@ -530,8 +533,9 @@ impl CodeGen {
         self.term = self.code.len();
         self.emit_mov_r64_i64(Reg::Rax, 0);
         self.code[jmp_start - 1] = (self.code.len() - jmp_start) as u8;
-        self.emit_add_rm64_i32(RegMem::Reg(Reg::Rsp), (temps * 8) as i32);
-        for reg in [Reg::R15, Reg::R14, Reg::R13, Reg::R12, Reg::Rbp, Reg::Rbx] {
+        let aligned = if temps % 2 == 0 { temps + 1 } else { temps };
+        self.emit_add_rm64_i32(RegMem::Reg(Reg::Rsp), (aligned * 8) as i32);
+        for reg in [Reg::R15, Reg::R14, Reg::R13, Reg::R12, Reg::Rbx, Reg::Rbp] {
             self.emit_pop_r64(reg);
         }
         self.emit_ret();
@@ -647,20 +651,36 @@ impl CodeGen {
 
     fn emit_pre_call(&mut self, mut live: u16) {
         live &= 0xfff0;
-        while live != 0 {
-            let l = live.trailing_zeros();
+        let mut ll = live;
+        while ll != 0 {
+            let l = ll.trailing_zeros();
             self.emit_push_r64(Reg::tmp(l as usize).unwrap());
-            live -= 1 << l;
+            ll -= 1 << l;
+        }
+        if live.count_ones().is_odd() {
+            self.emit_add_rm64_i32(RegMem::Reg(Reg::Rsp), 8);
         }
     }
 
-    fn emit_post_call(&mut self, mut live: u16) {
-        live &= 0xfff0;
-        while live != 0 {
-            let l = 15 - live.leading_zeros();
-            self.emit_pop_r64(Reg::tmp(l as usize).unwrap());
-            live -= 1 << l;
+    fn emit_post_call(&mut self, live: u16) {
+        let mut ll = live & 0xfff0;
+        if ll.count_ones().is_odd() {
+            self.emit_sub_rm64_i32(RegMem::Reg(Reg::Rsp), 8);
         }
+        while ll != 0 {
+            let l = 15 - ll.leading_zeros();
+            self.emit_pop_r64(Reg::tmp(l as usize).unwrap());
+            ll -= 1 << l;
+        }
+    }
+
+    fn emit_limit_check(&mut self) {
+        self.emit_mov_r64_rm64(Reg::scr0(), RegMem::Mem(Some(Reg::cxt()), None, 1, 24));
+        self.emit_cmp_rm64_i8(RegMem::Reg(Reg::scr0()), 2);
+        self.emit_jcc_rel32(JmpPred::Below, 0);
+        self.reloc_term.push(self.code.len() - 4);
+        self.emit_sub_rm64_i32(RegMem::Reg(Reg::scr0()), 1);
+        self.emit_mov_rm64_r64(RegMem::Mem(Some(Reg::cxt()), None, 1, 24), Reg::scr0());
     }
 
     fn can_use_as_scratch(&self, live: u16, tmp: usize) -> bool {
@@ -671,9 +691,14 @@ impl CodeGen {
         }
     }
 
-    fn emit_program<C: CellType>(&mut self, program: &Program<C>, _limited: bool) {
+    fn emit_program<C: CellType>(&mut self, program: &Program<C>, limited: bool) {
         for (i, (&instr, &live)) in program.insts.iter().zip(program.live.iter()).enumerate() {
             self.locations.push(self.code.len());
+            if limited {
+                if let Instr::BrZ(_, _) | Instr::BrNZ(_, _) = instr {
+                    self.emit_limit_check();
+                }
+            }
             match instr {
                 Instr::Noop => { /* we skip nop */ }
                 Instr::Mov(shift) => {
@@ -741,7 +766,7 @@ impl CodeGen {
                     self.emit_mov_r64_i64(Reg::scr0(), hpbf_context_output::<C> as i64);
                     self.emit_call_ind(RegMem::Reg(Reg::scr0()));
                     self.emit_post_call(live);
-                    self.emit_cmp_rm64_i8(RegMem::Reg(Reg::Rax), 0);
+                    self.emit_cmp_rm8_i8(RegMem::Reg(Reg::Rax), 0);
                     self.emit_jcc_rel32(JmpPred::NotEqual, 0);
                     self.reloc_term.push(self.code.len() - 4);
                 }
@@ -918,10 +943,10 @@ impl CodeGen {
                 Instr::Add(Loc::Tmp(tmp), Loc::Mem(idx0), Loc::Mem(idx1)) => {
                     if let Some(reg) = Reg::tmp(tmp) {
                         self.emit_load::<C>(idx0, reg);
-                        self.emit_add_reg::<C>(idx1, reg);
+                        self.emit_add_to_reg::<C>(idx1, reg);
                     } else {
                         self.emit_load::<C>(idx0, Reg::scr0());
-                        self.emit_add_reg::<C>(idx1, Reg::scr0());
+                        self.emit_add_to_reg::<C>(idx1, Reg::scr0());
                         self.emit_mov_rm64_r64(self.tmp_param(tmp), Reg::scr0());
                     }
                 }
@@ -1358,7 +1383,7 @@ impl<C: CellType> BaseJitCompiler<C> {
             let entry = mem::transmute::<_, HpbfEntry<C>>(code_mem);
             result = entry(cxt, mem_ptr);
             assert!(
-                libc::munmap(ptr::null_mut(), len) == 0,
+                libc::munmap(code_mem as *mut _, len) == 0,
                 "failed to munmap jit memory"
             );
         }
@@ -1373,10 +1398,9 @@ impl<C: CellType> BaseJitCompiler<C> {
 
     /// Execute in the given context using the JIT compiler.
     fn execute_limited_in(&self, cxt: &mut Context<C>, budget: usize) -> bool {
+        let code = self.compile_program(true);
         cxt.budget = budget;
-        false
-        // let code = self.compile_program(true);
-        // self.enter_jit_code(cxt, code)
+        self.enter_jit_code(cxt, code)
     }
 }
 
@@ -1402,7 +1426,7 @@ impl<C: CellType> Executable<C> for BaseJitCompiler<C> {
 
 /// Runtime function. Extends the memory buffer and moves the offset to make the range
 /// from `min` (inclusive) to `max` (exclusive) accessible.
-extern "C" fn hpbf_context_extend<C: CellType>(
+extern "sysv64" fn hpbf_context_extend<C: CellType>(
     cxt: &mut Context<'static, C>,
     min: isize,
     max: isize,
@@ -1411,12 +1435,15 @@ extern "C" fn hpbf_context_extend<C: CellType>(
 }
 
 /// Runtime function. Get a value form the input, or zero in case the input closed.
-extern "C" fn hpbf_context_input<C: CellType>(cxt: &mut Context<'static, C>) -> C {
+extern "sysv64" fn hpbf_context_input<C: CellType>(cxt: &mut Context<'static, C>) -> C {
     C::from_u8(cxt.input().unwrap_or(0))
 }
 
 /// Runtime function. Print the given value to the output and return true if the output closed.
-extern "C" fn hpbf_context_output<C: CellType>(cxt: &mut Context<'static, u8>, value: C) -> bool {
+extern "sysv64" fn hpbf_context_output<C: CellType>(
+    cxt: &mut Context<'static, u8>,
+    value: C,
+) -> bool {
     cxt.output(value.into_u8()).is_none()
 }
 
