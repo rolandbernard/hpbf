@@ -1,74 +1,20 @@
-//! A baseline JIT compiler using the bytecode infrastructure.
-
-use std::{mem, ptr};
+//! This module contains code generation specific to this implementation. It uses
+//! the definitions in [`super::asm`] to emit machine code and does relocation
+//! based on the assumption that the pc relative address is in the last four bytes
+//! of the jump instruction (which is true for x86_64).
 
 use crate::{
-    bc::{self, Instr, Loc, Program},
-    ir,
-    runtime::Context,
-    CellType, Error,
+    bc::{Instr, Loc, Program},
+    CellType,
 };
 
-use super::{Executable, Executor};
-
-/// Function type of the generated JIT function.
-type HpbfEntry<'a, C> = unsafe extern "sysv64" fn(cxt: *mut Context<'a, C>, mem: *mut C) -> bool;
-
-/// A baseline compiler that does some limited optimizing transformations of the
-/// program and executes the result using a simple JIT compiler.
-pub struct BaseJitCompiler<C: CellType> {
-    bytecode: Program<C>,
-}
-
-/// Struct implementing the compilation.
-/// Current register usage:
-///   rsp -> stack pointer used for temps >= 11
-///   rbx -> context pointer
-///   rbp -> memory pointer
-///   rax,rcx -> used for intermediate values
-///   others -> temps < 11
-struct CodeGen {
-    locations: Vec<usize>,
-    reloc_br: Vec<(usize, usize)>,
-    reloc_term: Vec<usize>,
-    term: usize,
-    code: Vec<u8>,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Reg {
-    Rax = 0,
-    Rcx,
-    Rdx,
-    Rbx,
-    Rsp,
-    Rbp,
-    Rsi,
-    Rdi,
-    R8,
-    R9,
-    R10,
-    R11,
-    R12,
-    R13,
-    R14,
-    R15,
-}
-
-#[derive(Clone, Copy)]
-enum RegMem {
-    Reg(Reg),
-    Mem(Option<Reg>, Option<Reg>, u8, i32),
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum JmpPred {
-    Below = 0x02,
-    Equal = 0x04,
-    NotEqual = 0x05,
-}
+use super::{
+    hpbf_context_extend, hpbf_context_input, hpbf_context_output, CodeGen, JmpPred, Reg, RegMem,
+};
 
 impl Reg {
+    /// Return the register holding the given temporary or [`None`] if the temporary
+    /// is stored on the stack and not in a register.
     fn tmp(tmp: usize) -> Option<Self> {
         // Note, we put callee saved register first, because the bytecode generator
         // prefers to allocate low-numbered temporaries and we want to avoid
@@ -90,433 +36,209 @@ impl Reg {
         .cloned()
     }
 
+    /// Returns the register holding the context pointer.
     fn cxt() -> Self {
         Reg::Rbx
     }
 
+    /// Returns the register holding the memory pointer.
     fn mem() -> Self {
         Reg::Rbp
     }
 
+    /// Returns a register that can be used as a scratch register.
     fn scr0() -> Self {
         Reg::Rax
     }
 
+    /// Returns a register that can be used as a scratch register. This register
+    /// is guaranteed to be distinct from the one returned by [`Self::scr0`].
     fn scr1() -> Self {
         Reg::Rcx
     }
+}
 
-    fn enc(self) -> u8 {
-        self as u8 & 7
+impl CodeGen {
+    /// Get the memory parameter for accessing the memory pointer at the given offset.
+    fn mem_param<C: CellType>(&self, idx: isize) -> RegMem {
+        match C::BITS {
+            8 => RegMem::Mem(Some(Reg::mem()), None, 1, idx as i32),
+            16 => RegMem::Mem(Some(Reg::mem()), None, 1, 2 * idx as i32),
+            32 => RegMem::Mem(Some(Reg::mem()), None, 1, 4 * idx as i32),
+            64 => RegMem::Mem(Some(Reg::mem()), None, 1, 8 * idx as i32),
+            _ => unimplemented!("bit width {}", C::BITS),
+        }
+    }
+
+    /// Emit a store from a register into the memory cell at offset `idx` form
+    /// the current memory pointer.
+    fn emit_store_reg<C: CellType>(&mut self, idx: isize, reg: Reg) {
+        match C::BITS {
+            8 => self.emit_mov_rm8_r8(self.mem_param::<C>(idx), reg),
+            16 => self.emit_mov_rm16_r16(self.mem_param::<C>(idx), reg),
+            32 => self.emit_mov_rm32_r32(self.mem_param::<C>(idx), reg),
+            64 => self.emit_mov_rm64_r64(self.mem_param::<C>(idx), reg),
+            _ => unimplemented!("bit width {}", C::BITS),
+        }
+    }
+
+    /// Emit a store of the 32 bit immediate into the memory cell at offset `idx`
+    /// form the current memory pointer.
+    fn emit_store_i32<C: CellType>(&mut self, idx: isize, imm: i32) {
+        match C::BITS {
+            8 => self.emit_mov_rm8_i8(self.mem_param::<C>(idx), imm as i8),
+            16 => self.emit_mov_rm16_i16(self.mem_param::<C>(idx), imm as i16),
+            32 => self.emit_mov_rm32_i32(self.mem_param::<C>(idx), imm),
+            64 => self.emit_mov_rm64_i32(self.mem_param::<C>(idx), imm),
+            _ => unimplemented!("bit width {}", C::BITS),
+        }
+    }
+
+    /// Emit an addition of the given register to the memory cell at offset `idx`.
+    fn emit_add_reg<C: CellType>(&mut self, idx: isize, reg: Reg) {
+        match C::BITS {
+            8 => self.emit_add_rm8_r8(self.mem_param::<C>(idx), reg),
+            16 => self.emit_add_rm16_r16(self.mem_param::<C>(idx), reg),
+            32 => self.emit_add_rm32_r32(self.mem_param::<C>(idx), reg),
+            64 => self.emit_add_rm64_r64(self.mem_param::<C>(idx), reg),
+            _ => unimplemented!("bit width {}", C::BITS),
+        }
+    }
+
+    /// Emit an addition of the value in the memory cell at `idx` into `reg`.
+    fn emit_add_to_reg<C: CellType>(&mut self, idx: isize, reg: Reg) {
+        match C::BITS {
+            8 => self.emit_add_r8_rm8(reg, self.mem_param::<C>(idx)),
+            16 => self.emit_add_r16_rm16(reg, self.mem_param::<C>(idx)),
+            32 => self.emit_add_r32_rm32(reg, self.mem_param::<C>(idx)),
+            64 => self.emit_add_r64_rm64(reg, self.mem_param::<C>(idx)),
+            _ => unimplemented!("bit width {}", C::BITS),
+        }
+    }
+
+    /// Emit an addition of the 32 bit immediate to the memory cell at offset `idx`.
+    fn emit_add_i32<C: CellType>(&mut self, idx: isize, imm: i32) {
+        match C::BITS {
+            8 => self.emit_add_rm8_i8(self.mem_param::<C>(idx), imm as i8),
+            16 => self.emit_add_rm16_i16(self.mem_param::<C>(idx), imm as i16),
+            32 => self.emit_add_rm32_i32(self.mem_param::<C>(idx), imm),
+            64 => self.emit_add_rm64_i32(self.mem_param::<C>(idx), imm),
+            _ => unimplemented!("bit width {}", C::BITS),
+        }
+    }
+
+    /// Emit a subtraction of the given register to the memory cell at offset `idx`.
+    fn emit_sub_reg<C: CellType>(&mut self, idx: isize, reg: Reg) {
+        match C::BITS {
+            8 => self.emit_sub_rm8_r8(self.mem_param::<C>(idx), reg),
+            16 => self.emit_sub_rm16_r16(self.mem_param::<C>(idx), reg),
+            32 => self.emit_sub_rm32_r32(self.mem_param::<C>(idx), reg),
+            64 => self.emit_sub_rm64_r64(self.mem_param::<C>(idx), reg),
+            _ => unimplemented!("bit width {}", C::BITS),
+        }
+    }
+
+    /// Emit a subtraction of the value in the memory cell at `idx` into `reg`.
+    fn emit_sub_to_reg<C: CellType>(&mut self, idx: isize, reg: Reg) {
+        match C::BITS {
+            8 => self.emit_sub_r8_rm8(reg, self.mem_param::<C>(idx)),
+            16 => self.emit_sub_r16_rm16(reg, self.mem_param::<C>(idx)),
+            32 => self.emit_sub_r32_rm32(reg, self.mem_param::<C>(idx)),
+            64 => self.emit_sub_r64_rm64(reg, self.mem_param::<C>(idx)),
+            _ => unimplemented!("bit width {}", C::BITS),
+        }
+    }
+
+    /// Emit a load from the given memory cell at `idx` into rge register `reg`.
+    fn emit_load<C: CellType>(&mut self, idx: isize, reg: Reg) {
+        match C::BITS {
+            8 => self.emit_mov_r64_rm8(reg, self.mem_param::<C>(idx)),
+            16 => self.emit_mov_r64_rm16(reg, self.mem_param::<C>(idx)),
+            32 => self.emit_mov_r64_rm32(reg, self.mem_param::<C>(idx)),
+            64 => self.emit_mov_r64_rm64(reg, self.mem_param::<C>(idx)),
+            _ => unimplemented!("bit width {}", C::BITS),
+        }
+    }
+
+    /// Get the memory parameter for accessing the given temporary. This may either
+    /// be a memory access or a register access depending on the temporary.
+    fn tmp_param(&self, tmp: usize) -> RegMem {
+        if let Some(reg) = Reg::tmp(tmp) {
+            RegMem::Reg(reg)
+        } else {
+            RegMem::Mem(Some(Reg::Rsp), None, 1, 8 * tmp as i32)
+        }
+    }
+
+    /// Compare the value of the given memory location with zero.
+    fn emit_cmp_zero<C: CellType>(&mut self, idx: isize) {
+        match C::BITS {
+            8 => self.emit_cmp_rm8_i8(self.mem_param::<C>(idx), 0),
+            16 => self.emit_cmp_rm16_i8(self.mem_param::<C>(idx), 0),
+            32 => self.emit_cmp_rm32_i8(self.mem_param::<C>(idx), 0),
+            64 => self.emit_cmp_rm64_i8(self.mem_param::<C>(idx), 0),
+            _ => unimplemented!("bit width {}", C::BITS),
+        }
+    }
+
+    /// Push all caller saved registers indicated by `live`. This is used before
+    /// emitting a runtime call following the `sysv64` ABI.
+    fn emit_pre_call(&mut self, mut live: u16) {
+        live &= 0xfff0;
+        let mut ll = live;
+        while ll != 0 {
+            let l = ll.trailing_zeros();
+            self.emit_push_r64(Reg::tmp(l as usize).unwrap());
+            ll -= 1 << l;
+        }
+        if live.count_ones().is_odd() {
+            self.emit_add_rm64_i32(RegMem::Reg(Reg::Rsp), 8);
+        }
+    }
+
+    /// Pop all caller saved registers indicated by `live`. This is used after
+    /// emitting a runtime call following the `sysv64` ABI. The registers are
+    /// poped in the reverse order in which they are pushed by [`Self::emit_pre_call`].
+    fn emit_post_call(&mut self, live: u16) {
+        let mut ll = live & 0xfff0;
+        if ll.count_ones().is_odd() {
+            self.emit_sub_rm64_i32(RegMem::Reg(Reg::Rsp), 8);
+        }
+        while ll != 0 {
+            let l = 15 - ll.leading_zeros();
+            self.emit_pop_r64(Reg::tmp(l as usize).unwrap());
+            ll -= 1 << l;
+        }
+    }
+
+    /// Emit a budget check. This should only be used in limited mode before each branch.
+    fn emit_limit_check(&mut self) {
+        self.emit_mov_r64_rm64(Reg::scr0(), RegMem::Mem(Some(Reg::cxt()), None, 1, 24));
+        self.emit_cmp_rm64_i8(RegMem::Reg(Reg::scr0()), 2);
+        self.emit_jcc_rel32(JmpPred::Below, 0);
+        self.reloc_term.push(self.code.len() - 4);
+        self.emit_sub_rm64_i32(RegMem::Reg(Reg::scr0()), 1);
+        self.emit_mov_rm64_r64(RegMem::Mem(Some(Reg::cxt()), None, 1, 24), Reg::scr0());
+    }
+
+    /// Returns true if the given register can be used as a scratch register, that is
+    /// it is not marked as live in the given `live`.
+    fn can_use_as_scratch(&self, live: u16, tmp: usize) -> bool {
+        if tmp < 11 {
+            (live & (1 << tmp)) == 0
+        } else {
+            false
+        }
     }
 }
 
 impl CodeGen {
-    fn emit_rex(&mut self, wide: bool, reg: Option<Reg>, rm: RegMem) {
-        let byte = 0x40
-            + (wide as u8) * 0x8
-            + ((reg.unwrap_or(Reg::Rax) as u8 >> 3) << 2)
-            + match rm {
-                RegMem::Reg(r) => r as u8 >> 3,
-                RegMem::Mem(base, idx, _, _) => {
-                    ((idx.unwrap_or(Reg::Rax) as u8 >> 3) << 1)
-                        + (base.unwrap_or(Reg::Rax) as u8 >> 3)
-                }
-            };
-        if byte != 0x40
-            || reg.is_some_and(|r| [Reg::Rsp, Reg::Rbp, Reg::Rsi, Reg::Rdi].contains(&r))
-        {
-            self.code.push(byte);
-        }
-    }
-
-    fn emit_modrm(&mut self, reg: Option<Reg>, op: u8, rm: RegMem) {
-        match rm {
-            RegMem::Reg(r) => {
-                self.code
-                    .push(0xc0 + (op << 3) + (reg.unwrap_or(Reg::Rax).enc() << 3) + r.enc());
-            }
-            RegMem::Mem(base, idx, mul, disp) => {
-                let is_small = disp <= 127 && disp >= -128 && base.is_some();
-                let is_zero = disp == 0 && base.is_some() && base.unwrap().enc() != 5;
-                let mode = ((!is_zero && base.is_some()) as u8) << (6 + !is_small as u32);
-                let modrm = mode + (op << 3) + (reg.unwrap_or(Reg::Rax).enc() << 3);
-                if idx.is_none() && base.is_some() && base.unwrap().enc() != 4 {
-                    self.code.push(modrm + base.unwrap().enc());
-                } else {
-                    self.code.push(modrm + 4);
-                    self.code.push(
-                        ((mul.ilog2() as u8) << 6)
-                            + (idx.unwrap_or(Reg::Rsp).enc() << 3)
-                            + base.unwrap_or(Reg::Rbp).enc(),
-                    );
-                }
-                if !is_zero {
-                    if is_small {
-                        self.code.push(disp as u8);
-                    } else {
-                        self.code.extend_from_slice(&disp.to_le_bytes());
-                    }
-                }
-            }
-        }
-    }
-
-    fn emit_push_r64(&mut self, reg: Reg) {
-        self.emit_rex(false, None, RegMem::Reg(reg));
-        self.code.push(0x50 + reg.enc());
-    }
-
-    fn emit_pop_r64(&mut self, reg: Reg) {
-        self.emit_rex(false, None, RegMem::Reg(reg));
-        self.code.push(0x58 + reg.enc());
-    }
-
-    fn emit_add_rm64_i32(&mut self, rm: RegMem, imm: i32) {
-        let is_small = imm <= 127 && imm >= -128;
-        self.emit_rex(true, None, rm);
-        self.code.push(if is_small { 0x83 } else { 0x81 });
-        self.emit_modrm(None, 0, rm);
-        if is_small {
-            self.code.push(imm as u8);
-        } else {
-            self.code.extend_from_slice(&imm.to_le_bytes());
-        }
-    }
-
-    fn emit_add_rm32_i32(&mut self, rm: RegMem, imm: i32) {
-        let is_small = imm <= 127 && imm >= -128;
-        self.emit_rex(false, None, rm);
-        self.code.push(if is_small { 0x83 } else { 0x81 });
-        self.emit_modrm(None, 0, rm);
-        if is_small {
-            self.code.push(imm as u8);
-        } else {
-            self.code.extend_from_slice(&imm.to_le_bytes());
-        }
-    }
-
-    fn emit_add_rm16_i16(&mut self, rm: RegMem, imm: i16) {
-        let is_small = imm <= 127 && imm >= -128;
-        self.code.push(0x66);
-        self.emit_rex(false, None, rm);
-        self.code.push(if is_small { 0x83 } else { 0x81 });
-        self.emit_modrm(None, 0, rm);
-        if is_small {
-            self.code.push(imm as u8);
-        } else {
-            self.code.extend_from_slice(&imm.to_le_bytes());
-        }
-    }
-
-    fn emit_add_rm8_i8(&mut self, rm: RegMem, imm: i8) {
-        self.emit_rex(false, None, rm);
-        self.code.push(0x80);
-        self.emit_modrm(None, 0, rm);
-        self.code.push(imm as u8);
-    }
-
-    fn emit_add_rm64_r64(&mut self, dst: RegMem, src: Reg) {
-        self.emit_rex(true, Some(src), dst);
-        self.code.push(0x01);
-        self.emit_modrm(Some(src), 0, dst);
-    }
-
-    fn emit_add_rm32_r32(&mut self, dst: RegMem, src: Reg) {
-        self.emit_rex(false, Some(src), dst);
-        self.code.push(0x01);
-        self.emit_modrm(Some(src), 0, dst);
-    }
-
-    fn emit_add_rm16_r16(&mut self, dst: RegMem, src: Reg) {
-        self.code.push(0x66);
-        self.emit_rex(false, Some(src), dst);
-        self.code.push(0x01);
-        self.emit_modrm(Some(src), 0, dst);
-    }
-
-    fn emit_add_rm8_r8(&mut self, dst: RegMem, src: Reg) {
-        self.emit_rex(false, Some(src), dst);
-        self.code.push(0x00);
-        self.emit_modrm(Some(src), 0, dst);
-    }
-
-    fn emit_add_r64_rm64(&mut self, dst: Reg, src: RegMem) {
-        self.emit_rex(true, Some(dst), src);
-        self.code.push(0x03);
-        self.emit_modrm(Some(dst), 0, src);
-    }
-
-    fn emit_add_r32_rm32(&mut self, dst: Reg, src: RegMem) {
-        self.emit_rex(false, Some(dst), src);
-        self.code.push(0x03);
-        self.emit_modrm(Some(dst), 0, src);
-    }
-
-    fn emit_add_r16_rm16(&mut self, dst: Reg, src: RegMem) {
-        self.code.push(0x66);
-        self.emit_rex(false, Some(dst), src);
-        self.code.push(0x03);
-        self.emit_modrm(Some(dst), 0, src);
-    }
-
-    fn emit_add_r8_rm8(&mut self, dst: Reg, src: RegMem) {
-        self.emit_rex(false, Some(dst), src);
-        self.code.push(0x02);
-        self.emit_modrm(Some(dst), 0, src);
-    }
-
-    fn emit_sub_rm64_i32(&mut self, rm: RegMem, imm: i32) {
-        let is_small = imm <= 127 && imm >= -128;
-        self.emit_rex(true, None, rm);
-        self.code.push(if is_small { 0x83 } else { 0x81 });
-        self.emit_modrm(None, 5, rm);
-        if is_small {
-            self.code.push(imm as u8);
-        } else {
-            self.code.extend_from_slice(&imm.to_le_bytes());
-        }
-    }
-
-    fn emit_sub_rm64_r64(&mut self, dst: RegMem, src: Reg) {
-        self.emit_rex(true, Some(src), dst);
-        self.code.push(0x29);
-        self.emit_modrm(Some(src), 0, dst);
-    }
-
-    fn emit_sub_rm32_r32(&mut self, dst: RegMem, src: Reg) {
-        self.emit_rex(false, Some(src), dst);
-        self.code.push(0x29);
-        self.emit_modrm(Some(src), 0, dst);
-    }
-
-    fn emit_sub_rm16_r16(&mut self, dst: RegMem, src: Reg) {
-        self.code.push(0x66);
-        self.emit_rex(false, Some(src), dst);
-        self.code.push(0x29);
-        self.emit_modrm(Some(src), 0, dst);
-    }
-
-    fn emit_sub_rm8_r8(&mut self, dst: RegMem, src: Reg) {
-        self.emit_rex(false, Some(src), dst);
-        self.code.push(0x28);
-        self.emit_modrm(Some(src), 0, dst);
-    }
-
-    fn emit_sub_r64_rm64(&mut self, dst: Reg, src: RegMem) {
-        self.emit_rex(true, Some(dst), src);
-        self.code.push(0x2B);
-        self.emit_modrm(Some(dst), 0, src);
-    }
-
-    fn emit_sub_r32_rm32(&mut self, dst: Reg, src: RegMem) {
-        self.emit_rex(false, Some(dst), src);
-        self.code.push(0x2B);
-        self.emit_modrm(Some(dst), 0, src);
-    }
-
-    fn emit_sub_r16_rm16(&mut self, dst: Reg, src: RegMem) {
-        self.code.push(0x66);
-        self.emit_rex(false, Some(dst), src);
-        self.code.push(0x2B);
-        self.emit_modrm(Some(dst), 0, src);
-    }
-
-    fn emit_sub_r8_rm8(&mut self, dst: Reg, src: RegMem) {
-        self.emit_rex(false, Some(dst), src);
-        self.code.push(0x2a);
-        self.emit_modrm(Some(dst), 0, src);
-    }
-
-    fn emit_mul_r64_rm64_i32(&mut self, dst: Reg, rm: RegMem, imm: i32) {
-        let is_small = imm <= 127 && imm >= -128;
-        self.emit_rex(true, Some(dst), rm);
-        self.code.push(if is_small { 0x6b } else { 0x69 });
-        self.emit_modrm(Some(dst), 0, rm);
-        if is_small {
-            self.code.push(imm as u8);
-        } else {
-            self.code.extend_from_slice(&imm.to_le_bytes());
-        }
-    }
-
-    fn emit_mul_r64_rm64(&mut self, dst: Reg, rm: RegMem) {
-        self.emit_rex(true, Some(dst), rm);
-        self.code.push(0x0f);
-        self.code.push(0xaf);
-        self.emit_modrm(Some(dst), 0, rm);
-    }
-
-    fn emit_mov_r64_i64(&mut self, reg: Reg, imm: i64) {
-        let is_small = imm <= i32::MAX as i64 && imm >= i32::MIN as i64;
-        let is_small_uns = imm >= 0 && imm <= u32::MAX as i64;
-        self.emit_rex(!is_small_uns, None, RegMem::Reg(reg));
-        if is_small || is_small_uns {
-            self.code.push(0xc7);
-            self.emit_modrm(None, 0, RegMem::Reg(reg));
-            self.code.extend_from_slice(&(imm as i32).to_le_bytes());
-        } else {
-            self.code.push(0xb8 + reg.enc());
-            self.code.extend_from_slice(&imm.to_le_bytes());
-        }
-    }
-
-    fn emit_mov_rm64_i32(&mut self, rm: RegMem, imm: i32) {
-        self.emit_rex(true, None, rm);
-        self.code.push(0xc7);
-        self.emit_modrm(None, 0, rm);
-        self.code.extend_from_slice(&imm.to_le_bytes());
-    }
-
-    fn emit_mov_rm32_i32(&mut self, rm: RegMem, imm: i32) {
-        self.emit_rex(false, None, rm);
-        self.code.push(0xc7);
-        self.emit_modrm(None, 0, rm);
-        self.code.extend_from_slice(&imm.to_le_bytes());
-    }
-
-    fn emit_mov_rm16_i16(&mut self, rm: RegMem, imm: i16) {
-        self.code.push(0x66);
-        self.emit_rex(false, None, rm);
-        self.code.push(0xc7);
-        self.emit_modrm(None, 0, rm);
-        self.code.extend_from_slice(&imm.to_le_bytes());
-    }
-
-    fn emit_mov_rm8_i8(&mut self, rm: RegMem, imm: i8) {
-        self.emit_rex(false, None, rm);
-        self.code.push(0xc6);
-        self.emit_modrm(None, 0, rm);
-        self.code.push(imm as u8);
-    }
-
-    fn emit_mov_r64_rm64(&mut self, dst: Reg, src: RegMem) {
-        self.emit_rex(true, Some(dst), src);
-        self.code.push(0x8b);
-        self.emit_modrm(Some(dst), 0, src);
-    }
-
-    fn emit_mov_rm64_r64(&mut self, dst: RegMem, src: Reg) {
-        self.emit_rex(true, Some(src), dst);
-        self.code.push(0x89);
-        self.emit_modrm(Some(src), 0, dst);
-    }
-
-    fn emit_mov_r64_rm32(&mut self, dst: Reg, src: RegMem) {
-        self.emit_rex(false, Some(dst), src);
-        self.code.push(0x8b);
-        self.emit_modrm(Some(dst), 0, src);
-    }
-
-    fn emit_mov_rm32_r32(&mut self, dst: RegMem, src: Reg) {
-        self.emit_rex(false, Some(src), dst);
-        self.code.push(0x89);
-        self.emit_modrm(Some(src), 0, dst);
-    }
-
-    fn emit_mov_r64_rm16(&mut self, dst: Reg, src: RegMem) {
-        self.emit_rex(false, Some(dst), src);
-        self.code.push(0x0f);
-        self.code.push(0xb7);
-        self.emit_modrm(Some(dst), 0, src);
-    }
-
-    fn emit_mov_rm16_r16(&mut self, dst: RegMem, src: Reg) {
-        self.code.push(0x66);
-        self.emit_rex(false, Some(src), dst);
-        self.code.push(0x89);
-        self.emit_modrm(Some(src), 0, dst);
-    }
-
-    fn emit_mov_r64_rm8(&mut self, dst: Reg, src: RegMem) {
-        self.emit_rex(false, Some(dst), src);
-        self.code.push(0x0f);
-        self.code.push(0xb6);
-        self.emit_modrm(Some(dst), 0, src);
-    }
-
-    fn emit_mov_rm8_r8(&mut self, dst: RegMem, src: Reg) {
-        self.emit_rex(false, Some(src), dst);
-        self.code.push(0x88);
-        self.emit_modrm(Some(src), 0, dst);
-    }
-
-    fn emit_lea(&mut self, dst: Reg, addr: RegMem) {
-        self.emit_rex(true, Some(dst), addr);
-        self.code.push(0x8d);
-        self.emit_modrm(Some(dst), 0, addr);
-    }
-
-    fn emit_cmp_r64_rm64(&mut self, fst: Reg, snd: RegMem) {
-        self.emit_rex(true, Some(fst), snd);
-        self.code.push(0x3b);
-        self.emit_modrm(Some(fst), 0, snd);
-    }
-
-    fn emit_cmp_rm64_i8(&mut self, rm: RegMem, imm: i8) {
-        self.emit_rex(true, None, rm);
-        self.code.push(0x83);
-        self.emit_modrm(None, 7, rm);
-        self.code.push(imm as u8);
-    }
-
-    fn emit_cmp_rm32_i8(&mut self, rm: RegMem, imm: i8) {
-        self.emit_rex(false, None, rm);
-        self.code.push(0x83);
-        self.emit_modrm(None, 7, rm);
-        self.code.push(imm as u8);
-    }
-
-    fn emit_cmp_rm16_i8(&mut self, rm: RegMem, imm: i8) {
-        self.code.push(0x66);
-        self.emit_rex(false, None, rm);
-        self.code.push(0x83);
-        self.emit_modrm(None, 7, rm);
-        self.code.push(imm as u8);
-    }
-
-    fn emit_cmp_rm8_i8(&mut self, rm: RegMem, imm: i8) {
-        self.emit_rex(false, None, rm);
-        self.code.push(0x80);
-        self.emit_modrm(None, 7, rm);
-        self.code.push(imm as u8);
-    }
-
-    fn emit_jmp_rel8(&mut self, off: i8) {
-        self.code.push(0xeb);
-        self.code.push(off as u8);
-    }
-
-    fn emit_jcc_rel8(&mut self, pred: JmpPred, off: i8) {
-        self.code.push(0x70 + pred as u8);
-        self.code.push(off as u8);
-    }
-
-    fn emit_jcc_rel32(&mut self, pred: JmpPred, off: i32) {
-        self.code.push(0x0f);
-        self.code.push(0x80 + pred as u8);
-        self.code.extend_from_slice(&off.to_le_bytes());
-    }
-
-    fn emit_sar_r64_i8(&mut self, dst: RegMem, shift: u8) {
-        self.emit_rex(true, None, dst);
-        self.code.push(0xc1);
-        self.emit_modrm(None, 7, dst);
-        self.code.push(shift);
-    }
-
-    fn emit_ret(&mut self) {
-        self.code.push(0xc3);
-    }
-
-    fn emit_call_ind(&mut self, target: RegMem) {
-        self.code.push(0xff);
-        self.emit_modrm(None, 2, target);
-    }
-}
-
-impl CodeGen {
-    fn emit_prologue(&mut self, temps: usize) {
+    /// Emit the function prologue for the machine code function.
+    /// Does the following:
+    /// * Push all callee saved register.
+    /// * Move the stack pointer to make room for the temporaries.
+    /// * Move the context and memory pointers to the ones used by the compiler.
+    pub fn emit_prologue(&mut self, temps: usize) {
         for reg in [Reg::Rbp, Reg::Rbx, Reg::R12, Reg::R13, Reg::R14, Reg::R15] {
             self.emit_push_r64(reg);
         }
@@ -526,7 +248,13 @@ impl CodeGen {
         self.emit_mov_r64_rm64(Reg::mem(), RegMem::Reg(Reg::Rsi));
     }
 
-    fn emit_epilogue(&mut self, temps: usize) {
+    /// Emit the function epilogue for the machine code function.
+    /// Does the following:
+    /// * Setup return value (for both normal, and terminated path).
+    /// * Move the stack pointer back to where it was.
+    /// * Pop all callee saved register.
+    /// * Return.
+    pub fn emit_epilogue(&mut self, temps: usize) {
         self.emit_mov_r64_i64(Reg::Rax, 1);
         self.emit_jmp_rel8(0);
         let jmp_start = self.code.len();
@@ -541,157 +269,29 @@ impl CodeGen {
         self.emit_ret();
     }
 
-    fn mem_param<C: CellType>(&self, idx: isize) -> RegMem {
-        match C::BITS {
-            8 => RegMem::Mem(Some(Reg::mem()), None, 1, idx as i32),
-            16 => RegMem::Mem(Some(Reg::mem()), None, 1, 2 * idx as i32),
-            32 => RegMem::Mem(Some(Reg::mem()), None, 1, 4 * idx as i32),
-            64 => RegMem::Mem(Some(Reg::mem()), None, 1, 8 * idx as i32),
-            _ => unimplemented!("bit width {}", C::BITS),
+    /// During compilation, branches and terminations generate relocations. These
+    /// are fixed with this function by patching the machine code. Only 32bit pc
+    /// relative relocations are used in this backed for simplicity.
+    pub fn fix_relocations(&mut self) {
+        for &(reloc, target) in &self.reloc_br {
+            let pc_rel = (self.locations[target] as isize - reloc as isize - 4) as i32;
+            self.code[reloc..reloc + 4].copy_from_slice(&pc_rel.to_le_bytes());
+        }
+        for &reloc in &self.reloc_term {
+            let pc_rel = (self.term as isize - reloc as isize - 4) as i32;
+            self.code[reloc..reloc + 4].copy_from_slice(&pc_rel.to_le_bytes());
         }
     }
 
-    fn emit_store_reg<C: CellType>(&mut self, idx: isize, reg: Reg) {
-        match C::BITS {
-            8 => self.emit_mov_rm8_r8(self.mem_param::<C>(idx), reg),
-            16 => self.emit_mov_rm16_r16(self.mem_param::<C>(idx), reg),
-            32 => self.emit_mov_rm32_r32(self.mem_param::<C>(idx), reg),
-            64 => self.emit_mov_rm64_r64(self.mem_param::<C>(idx), reg),
-            _ => unimplemented!("bit width {}", C::BITS),
-        }
-    }
-
-    fn emit_store_i32<C: CellType>(&mut self, idx: isize, imm: i32) {
-        match C::BITS {
-            8 => self.emit_mov_rm8_i8(self.mem_param::<C>(idx), imm as i8),
-            16 => self.emit_mov_rm16_i16(self.mem_param::<C>(idx), imm as i16),
-            32 => self.emit_mov_rm32_i32(self.mem_param::<C>(idx), imm),
-            64 => self.emit_mov_rm64_i32(self.mem_param::<C>(idx), imm),
-            _ => unimplemented!("bit width {}", C::BITS),
-        }
-    }
-
-    fn emit_add_reg<C: CellType>(&mut self, idx: isize, reg: Reg) {
-        match C::BITS {
-            8 => self.emit_add_rm8_r8(self.mem_param::<C>(idx), reg),
-            16 => self.emit_add_rm16_r16(self.mem_param::<C>(idx), reg),
-            32 => self.emit_add_rm32_r32(self.mem_param::<C>(idx), reg),
-            64 => self.emit_add_rm64_r64(self.mem_param::<C>(idx), reg),
-            _ => unimplemented!("bit width {}", C::BITS),
-        }
-    }
-
-    fn emit_add_to_reg<C: CellType>(&mut self, idx: isize, reg: Reg) {
-        match C::BITS {
-            8 => self.emit_add_r8_rm8(reg, self.mem_param::<C>(idx)),
-            16 => self.emit_add_r16_rm16(reg, self.mem_param::<C>(idx)),
-            32 => self.emit_add_r32_rm32(reg, self.mem_param::<C>(idx)),
-            64 => self.emit_add_r64_rm64(reg, self.mem_param::<C>(idx)),
-            _ => unimplemented!("bit width {}", C::BITS),
-        }
-    }
-
-    fn emit_add_i32<C: CellType>(&mut self, idx: isize, imm: i32) {
-        match C::BITS {
-            8 => self.emit_add_rm8_i8(self.mem_param::<C>(idx), imm as i8),
-            16 => self.emit_add_rm16_i16(self.mem_param::<C>(idx), imm as i16),
-            32 => self.emit_add_rm32_i32(self.mem_param::<C>(idx), imm),
-            64 => self.emit_add_rm64_i32(self.mem_param::<C>(idx), imm),
-            _ => unimplemented!("bit width {}", C::BITS),
-        }
-    }
-
-    fn emit_sub_reg<C: CellType>(&mut self, idx: isize, reg: Reg) {
-        match C::BITS {
-            8 => self.emit_sub_rm8_r8(self.mem_param::<C>(idx), reg),
-            16 => self.emit_sub_rm16_r16(self.mem_param::<C>(idx), reg),
-            32 => self.emit_sub_rm32_r32(self.mem_param::<C>(idx), reg),
-            64 => self.emit_sub_rm64_r64(self.mem_param::<C>(idx), reg),
-            _ => unimplemented!("bit width {}", C::BITS),
-        }
-    }
-
-    fn emit_sub_to_reg<C: CellType>(&mut self, idx: isize, reg: Reg) {
-        match C::BITS {
-            8 => self.emit_sub_r8_rm8(reg, self.mem_param::<C>(idx)),
-            16 => self.emit_sub_r16_rm16(reg, self.mem_param::<C>(idx)),
-            32 => self.emit_sub_r32_rm32(reg, self.mem_param::<C>(idx)),
-            64 => self.emit_sub_r64_rm64(reg, self.mem_param::<C>(idx)),
-            _ => unimplemented!("bit width {}", C::BITS),
-        }
-    }
-
-    fn emit_load<C: CellType>(&mut self, idx: isize, reg: Reg) {
-        match C::BITS {
-            8 => self.emit_mov_r64_rm8(reg, self.mem_param::<C>(idx)),
-            16 => self.emit_mov_r64_rm16(reg, self.mem_param::<C>(idx)),
-            32 => self.emit_mov_r64_rm32(reg, self.mem_param::<C>(idx)),
-            64 => self.emit_mov_r64_rm64(reg, self.mem_param::<C>(idx)),
-            _ => unimplemented!("bit width {}", C::BITS),
-        }
-    }
-
-    fn tmp_param(&self, tmp: usize) -> RegMem {
-        if let Some(reg) = Reg::tmp(tmp) {
-            RegMem::Reg(reg)
-        } else {
-            RegMem::Mem(Some(Reg::Rsp), None, 1, 8 * tmp as i32)
-        }
-    }
-
-    fn emit_cmp_zero<C: CellType>(&mut self, idx: isize) {
-        match C::BITS {
-            8 => self.emit_cmp_rm8_i8(self.mem_param::<C>(idx), 0),
-            16 => self.emit_cmp_rm16_i8(self.mem_param::<C>(idx), 0),
-            32 => self.emit_cmp_rm32_i8(self.mem_param::<C>(idx), 0),
-            64 => self.emit_cmp_rm64_i8(self.mem_param::<C>(idx), 0),
-            _ => unimplemented!("bit width {}", C::BITS),
-        }
-    }
-
-    fn emit_pre_call(&mut self, mut live: u16) {
-        live &= 0xfff0;
-        let mut ll = live;
-        while ll != 0 {
-            let l = ll.trailing_zeros();
-            self.emit_push_r64(Reg::tmp(l as usize).unwrap());
-            ll -= 1 << l;
-        }
-        if live.count_ones().is_odd() {
-            self.emit_add_rm64_i32(RegMem::Reg(Reg::Rsp), 8);
-        }
-    }
-
-    fn emit_post_call(&mut self, live: u16) {
-        let mut ll = live & 0xfff0;
-        if ll.count_ones().is_odd() {
-            self.emit_sub_rm64_i32(RegMem::Reg(Reg::Rsp), 8);
-        }
-        while ll != 0 {
-            let l = 15 - ll.leading_zeros();
-            self.emit_pop_r64(Reg::tmp(l as usize).unwrap());
-            ll -= 1 << l;
-        }
-    }
-
-    fn emit_limit_check(&mut self) {
-        self.emit_mov_r64_rm64(Reg::scr0(), RegMem::Mem(Some(Reg::cxt()), None, 1, 24));
-        self.emit_cmp_rm64_i8(RegMem::Reg(Reg::scr0()), 2);
-        self.emit_jcc_rel32(JmpPred::Below, 0);
-        self.reloc_term.push(self.code.len() - 4);
-        self.emit_sub_rm64_i32(RegMem::Reg(Reg::scr0()), 1);
-        self.emit_mov_rm64_r64(RegMem::Mem(Some(Reg::cxt()), None, 1, 24), Reg::scr0());
-    }
-
-    fn can_use_as_scratch(&self, live: u16, tmp: usize) -> bool {
-        if tmp < 10 {
-            (live & (1 << tmp)) == 0
-        } else {
-            false
-        }
-    }
-
-    fn emit_program<C: CellType>(&mut self, program: &Program<C>, limited: bool) {
+    /// Emit the main part of the machine code function. Every instruction is emitted
+    /// individually. Relocations will be generated for all termination paths and
+    /// branch instructions that must later be fixed using [`Self::fix_relocations`].
+    ///
+    /// Some instructions have a lot of variations in operand and return locations.
+    /// All of them are handles individually in the `match` below, with some special
+    /// casing depending on the size of immediate values and whether temporaries are
+    /// stored in registers of on the stack.
+    pub fn emit_program<C: CellType>(&mut self, program: &Program<C>, limited: bool) {
         for (i, (&instr, &live)) in program.insts.iter().zip(program.live.iter()).enumerate() {
             self.locations.push(self.code.len());
             if limited {
@@ -1322,130 +922,4 @@ impl CodeGen {
         }
         self.locations.push(self.code.len());
     }
-
-    fn fix_relocations(&mut self) {
-        for &(reloc, target) in &self.reloc_br {
-            let pc_rel = (self.locations[target] as isize - reloc as isize - 4) as i32;
-            self.code[reloc..reloc + 4].copy_from_slice(&pc_rel.to_le_bytes());
-        }
-        for &reloc in &self.reloc_term {
-            let pc_rel = (self.term as isize - reloc as isize - 4) as i32;
-            self.code[reloc..reloc + 4].copy_from_slice(&pc_rel.to_le_bytes());
-        }
-    }
 }
-
-impl<C: CellType> BaseJitCompiler<C> {
-    /// Return the machine code generated by this compiler.
-    pub fn print_mc(&self, limit: bool) -> Vec<u8> {
-        self.compile_program(limit)
-    }
-
-    /// Generate, from the bytecode, the corresponding machine code.
-    fn compile_program(&self, limited: bool) -> Vec<u8> {
-        let mut code_gen = CodeGen {
-            locations: Vec::new(),
-            reloc_br: Vec::new(),
-            reloc_term: Vec::new(),
-            term: 0,
-            code: Vec::new(),
-        };
-        code_gen.emit_prologue(self.bytecode.temps);
-        code_gen.emit_program(&self.bytecode, limited);
-        code_gen.emit_epilogue(self.bytecode.temps);
-        code_gen.fix_relocations();
-        code_gen.code
-    }
-
-    /// Allocate executable memory, copy the code into it, and enter the JITed code.
-    fn enter_jit_code(&self, cxt: &mut Context<C>, code: Vec<u8>) -> bool {
-        cxt.memory
-            .make_accessible(self.bytecode.min_accessed, self.bytecode.max_accessed + 1);
-        // Lets guess the page size is 4 or 16 KiB.
-        const PAGE_SIZE: usize = 1 << 14;
-        let result;
-        unsafe {
-            let len = (code.len() + PAGE_SIZE) & !(PAGE_SIZE - 1);
-            let code_mem = libc::mmap(
-                ptr::null_mut(),
-                len,
-                libc::PROT_EXEC | libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
-                0,
-                0,
-            ) as *mut u8;
-            assert!(
-                code_mem as isize != -1,
-                "failed mmap executable memory region"
-            );
-            ptr::copy_nonoverlapping(code.as_ptr(), code_mem, code.len());
-            let mem_ptr = cxt.memory.current_ptr();
-            let entry = mem::transmute::<_, HpbfEntry<C>>(code_mem);
-            result = entry(cxt, mem_ptr);
-            assert!(
-                libc::munmap(code_mem as *mut _, len) == 0,
-                "failed to munmap jit memory"
-            );
-        }
-        result
-    }
-
-    /// Execute in the given context using the JIT compiler.
-    fn execute_in<'a>(&self, cxt: &mut Context<'a, C>) {
-        let code = self.compile_program(false);
-        self.enter_jit_code(cxt, code);
-    }
-
-    /// Execute in the given context using the JIT compiler.
-    fn execute_limited_in(&self, cxt: &mut Context<C>, budget: usize) -> bool {
-        let code = self.compile_program(true);
-        cxt.budget = budget;
-        self.enter_jit_code(cxt, code)
-    }
-}
-
-impl<'code, C: CellType> Executor<'code, C> for BaseJitCompiler<C> {
-    fn create(code: &str, opt: u32) -> Result<Self, Error> {
-        let mut program = ir::Program::<C>::parse(code)?;
-        program = program.optimize(opt);
-        let bytecode = bc::CodeGen::translate(&program, 11, false);
-        Ok(BaseJitCompiler { bytecode })
-    }
-}
-
-impl<C: CellType> Executable<C> for BaseJitCompiler<C> {
-    fn execute(&self, context: &mut Context<C>) -> Result<(), Error> {
-        self.execute_in(context);
-        Ok(())
-    }
-
-    fn execute_limited(&self, context: &mut Context<C>, instr: usize) -> Result<bool, Error> {
-        Ok(self.execute_limited_in(context, instr))
-    }
-}
-
-/// Runtime function. Extends the memory buffer and moves the offset to make the range
-/// from `min` (inclusive) to `max` (exclusive) accessible.
-extern "sysv64" fn hpbf_context_extend<C: CellType>(
-    cxt: &mut Context<'static, C>,
-    min: isize,
-    max: isize,
-) {
-    cxt.memory.make_accessible(min, max);
-}
-
-/// Runtime function. Get a value form the input, or zero in case the input closed.
-extern "sysv64" fn hpbf_context_input<C: CellType>(cxt: &mut Context<'static, C>) -> C {
-    C::from_u8(cxt.input().unwrap_or(0))
-}
-
-/// Runtime function. Print the given value to the output and return true if the output closed.
-extern "sysv64" fn hpbf_context_output<C: CellType>(
-    cxt: &mut Context<'static, u8>,
-    value: C,
-) -> bool {
-    cxt.output(value.into_u8()).is_none()
-}
-
-executor_tests!(BaseJitCompiler);
-same_as_inplace_tests!(BaseJitCompiler);
