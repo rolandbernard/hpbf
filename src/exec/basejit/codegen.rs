@@ -192,7 +192,7 @@ impl CodeGen {
             ll -= 1 << l;
         }
         if live.count_ones().is_odd() {
-            self.emit_add_rm64_i32(RegMem::Reg(Reg::Rsp), 8);
+            self.emit_sub_rm64_i32(RegMem::Reg(Reg::Rsp), 8);
         }
     }
 
@@ -202,7 +202,7 @@ impl CodeGen {
     fn emit_post_call(&mut self, live: u16) {
         let mut ll = live & 0xfff0;
         if ll.count_ones().is_odd() {
-            self.emit_sub_rm64_i32(RegMem::Reg(Reg::Rsp), 8);
+            self.emit_add_rm64_i32(RegMem::Reg(Reg::Rsp), 8);
         }
         while ll != 0 {
             let l = 15 - ll.leading_zeros();
