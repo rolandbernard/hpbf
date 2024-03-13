@@ -333,6 +333,11 @@ macro_rules! same_as_inplace_tests {
                 "...,,[[>,.<]]",
                 infinite_loop_inside_other_loop
             );
+            same_as_inplace_test!(
+                $i,
+                "-[-.-<-<<>-><.-<<-.<>->-.->>.+]",
+                bc_temporaries_alive_over_output
+            );
 
             // These do not terminate and do not produce infinite output.
             same_as_inplace_test_limited!(

@@ -119,49 +119,73 @@ impl CodeGen {
 
     /// Automatically selects between the 32 bit or 8 bit immediate version.
     pub fn emit_add_rm64_i32(&mut self, rm: RegMem, imm: i32) {
-        let is_small = imm <= 127 && imm >= -128;
-        self.emit_rex(true, false, None, rm);
-        self.code.push(if is_small { 0x83 } else { 0x81 });
-        self.emit_modrm(None, 0, rm);
-        if is_small {
-            self.code.push(imm as u8);
+        if imm == -1 {
+            self.emit_dec_rm64(rm);
+        } else if imm == 1 {
+            self.emit_inc_rm64(rm);
         } else {
-            self.code.extend_from_slice(&imm.to_le_bytes());
+            let is_small = imm <= 127 && imm >= -128;
+            self.emit_rex(true, false, None, rm);
+            self.code.push(if is_small { 0x83 } else { 0x81 });
+            self.emit_modrm(None, 0, rm);
+            if is_small {
+                self.code.push(imm as u8);
+            } else {
+                self.code.extend_from_slice(&imm.to_le_bytes());
+            }
         }
     }
 
     /// Automatically selects between the 32 bit or 8 bit immediate version.
     pub fn emit_add_rm32_i32(&mut self, rm: RegMem, imm: i32) {
-        let is_small = imm <= 127 && imm >= -128;
-        self.emit_rex(false, false, None, rm);
-        self.code.push(if is_small { 0x83 } else { 0x81 });
-        self.emit_modrm(None, 0, rm);
-        if is_small {
-            self.code.push(imm as u8);
+        if imm == -1 {
+            self.emit_dec_rm32(rm);
+        } else if imm == 1 {
+            self.emit_inc_rm32(rm);
         } else {
-            self.code.extend_from_slice(&imm.to_le_bytes());
+            let is_small = imm <= 127 && imm >= -128;
+            self.emit_rex(false, false, None, rm);
+            self.code.push(if is_small { 0x83 } else { 0x81 });
+            self.emit_modrm(None, 0, rm);
+            if is_small {
+                self.code.push(imm as u8);
+            } else {
+                self.code.extend_from_slice(&imm.to_le_bytes());
+            }
         }
     }
 
     /// Automatically selects between the 16 bit or 8 bit immediate version.
     pub fn emit_add_rm16_i16(&mut self, rm: RegMem, imm: i16) {
-        let is_small = imm <= 127 && imm >= -128;
-        self.code.push(0x66);
-        self.emit_rex(false, false, None, rm);
-        self.code.push(if is_small { 0x83 } else { 0x81 });
-        self.emit_modrm(None, 0, rm);
-        if is_small {
-            self.code.push(imm as u8);
+        if imm == -1 {
+            self.emit_dec_rm16(rm);
+        } else if imm == 1 {
+            self.emit_inc_rm16(rm);
         } else {
-            self.code.extend_from_slice(&imm.to_le_bytes());
+            let is_small = imm <= 127 && imm >= -128;
+            self.code.push(0x66);
+            self.emit_rex(false, false, None, rm);
+            self.code.push(if is_small { 0x83 } else { 0x81 });
+            self.emit_modrm(None, 0, rm);
+            if is_small {
+                self.code.push(imm as u8);
+            } else {
+                self.code.extend_from_slice(&imm.to_le_bytes());
+            }
         }
     }
 
     pub fn emit_add_rm8_i8(&mut self, rm: RegMem, imm: i8) {
-        self.emit_rex(false, true, None, rm);
-        self.code.push(0x80);
-        self.emit_modrm(None, 0, rm);
-        self.code.push(imm as u8);
+        if imm == -1 {
+            self.emit_dec_rm8(rm);
+        } else if imm == 1 {
+            self.emit_inc_rm8(rm);
+        } else {
+            self.emit_rex(false, true, None, rm);
+            self.code.push(0x80);
+            self.emit_modrm(None, 0, rm);
+            self.code.push(imm as u8);
+        }
     }
 
     pub fn emit_add_rm64_r64(&mut self, dst: RegMem, src: Reg) {
@@ -216,14 +240,20 @@ impl CodeGen {
 
     /// Automatically selects between the 32 bit or 8 bit immediate version.
     pub fn emit_sub_rm64_i32(&mut self, rm: RegMem, imm: i32) {
-        let is_small = imm <= 127 && imm >= -128;
-        self.emit_rex(true, false, None, rm);
-        self.code.push(if is_small { 0x83 } else { 0x81 });
-        self.emit_modrm(None, 5, rm);
-        if is_small {
-            self.code.push(imm as u8);
+        if imm == 1 {
+            self.emit_dec_rm64(rm);
+        } else if imm == -1 {
+            self.emit_inc_rm64(rm);
         } else {
-            self.code.extend_from_slice(&imm.to_le_bytes());
+            let is_small = imm <= 127 && imm >= -128;
+            self.emit_rex(true, false, None, rm);
+            self.code.push(if is_small { 0x83 } else { 0x81 });
+            self.emit_modrm(None, 5, rm);
+            if is_small {
+                self.code.push(imm as u8);
+            } else {
+                self.code.extend_from_slice(&imm.to_le_bytes());
+            }
         }
     }
 
@@ -295,6 +325,56 @@ impl CodeGen {
         self.code.push(0x0f);
         self.code.push(0xaf);
         self.emit_modrm(Some(dst), 0, rm);
+    }
+
+    pub fn emit_inc_rm64(&mut self, dst: RegMem) {
+        self.emit_rex(true, false, None, dst);
+        self.code.push(0xff);
+        self.emit_modrm(None, 0, dst);
+    }
+
+    pub fn emit_inc_rm32(&mut self, dst: RegMem) {
+        self.emit_rex(false, false, None, dst);
+        self.code.push(0xff);
+        self.emit_modrm(None, 0, dst);
+    }
+
+    pub fn emit_inc_rm16(&mut self, dst: RegMem) {
+        self.code.push(0x66);
+        self.emit_rex(false, false, None, dst);
+        self.code.push(0xff);
+        self.emit_modrm(None, 0, dst);
+    }
+
+    pub fn emit_inc_rm8(&mut self, dst: RegMem) {
+        self.emit_rex(false, true, None, dst);
+        self.code.push(0xfe);
+        self.emit_modrm(None, 0, dst);
+    }
+
+    pub fn emit_dec_rm64(&mut self, dst: RegMem) {
+        self.emit_rex(true, false, None, dst);
+        self.code.push(0xff);
+        self.emit_modrm(None, 1, dst);
+    }
+
+    pub fn emit_dec_rm32(&mut self, dst: RegMem) {
+        self.emit_rex(false, false, None, dst);
+        self.code.push(0xff);
+        self.emit_modrm(None, 1, dst);
+    }
+
+    pub fn emit_dec_rm16(&mut self, dst: RegMem) {
+        self.code.push(0x66);
+        self.emit_rex(false, false, None, dst);
+        self.code.push(0xff);
+        self.emit_modrm(None, 1, dst);
+    }
+
+    pub fn emit_dec_rm8(&mut self, dst: RegMem) {
+        self.emit_rex(false, true, None, dst);
+        self.code.push(0xfe);
+        self.emit_modrm(None, 1, dst);
     }
 
     /// Automatically selects between the 64 bit or 32 bit immediate version.
@@ -434,6 +514,12 @@ impl CodeGen {
         self.code.push(0x80);
         self.emit_modrm(None, 7, rm);
         self.code.push(imm as u8);
+    }
+
+    pub fn emit_test_rm8_r8(&mut self, fst: RegMem, snd: Reg) {
+        self.emit_rex(false, true, Some(snd), fst);
+        self.code.push(0x84);
+        self.emit_modrm(Some(snd), 0, fst);
     }
 
     pub fn emit_jmp_rel8(&mut self, off: i8) {
