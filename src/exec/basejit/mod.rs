@@ -111,15 +111,8 @@ impl<C: CellType> BaseJitCompiler<C> {
     }
 
     /// Execute in the given context using the JIT compiler.
-    fn execute_in<'a>(&self, cxt: &mut Context<'a, C>) {
-        let code = self.compile_program(false);
-        self.enter_jit_code(cxt, code);
-    }
-
-    /// Execute in the given context using the JIT compiler.
-    fn execute_limited_in(&self, cxt: &mut Context<C>, budget: usize) -> bool {
-        let code = self.compile_program(true);
-        cxt.budget = budget;
+    fn execute_in<'a>(&self, cxt: &mut Context<'a, C>, limited: bool) -> bool {
+        let code = self.compile_program(limited);
         self.enter_jit_code(cxt, code)
     }
 }
@@ -135,12 +128,12 @@ impl<'code, C: CellType> Executor<'code, C> for BaseJitCompiler<C> {
 
 impl<C: CellType> Executable<C> for BaseJitCompiler<C> {
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error> {
-        self.execute_in(context);
+        self.execute_in(context, false);
         Ok(())
     }
 
-    fn execute_limited(&self, context: &mut Context<C>, instr: usize) -> Result<bool, Error> {
-        Ok(self.execute_limited_in(context, instr))
+    fn execute_limited(&self, context: &mut Context<C>) -> Result<bool, Error> {
+        Ok(self.execute_in(context, true))
     }
 }
 

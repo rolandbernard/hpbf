@@ -786,17 +786,9 @@ impl<C: CellType> LlvmJitCompiler<C> {
     }
 
     /// Execute in the given context using the LLVM based JIT compiler.
-    fn execute_in<'a>(&self, cxt: &mut Context<'a, C>) -> Result<(), Error> {
+    fn execute_in(&self, cxt: &mut Context<C>, limited: bool) -> Result<bool, Error> {
         let context = inkwell::context::Context::create();
-        let module = CodeGen::create(&context, self, false)?;
-        self.enter_jit_code(cxt, module).map(|_| ())
-    }
-
-    /// Execute in the given context using the LLVM based JIT compiler.
-    fn execute_limited_in(&self, cxt: &mut Context<C>, budget: usize) -> Result<bool, Error> {
-        let context = inkwell::context::Context::create();
-        let module = CodeGen::create(&context, self, true)?;
-        cxt.budget = budget;
+        let module = CodeGen::create(&context, self, limited)?;
         self.enter_jit_code(cxt, module)
     }
 }
@@ -817,11 +809,11 @@ impl<'p, C: CellType> Executor<'p, C> for LlvmJitCompiler<C> {
 
 impl<C: CellType> Executable<C> for LlvmJitCompiler<C> {
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error> {
-        self.execute_in(context)
+        self.execute_in(context, false).map(|_| ())
     }
 
-    fn execute_limited(&self, context: &mut Context<C>, instr: usize) -> Result<bool, Error> {
-        self.execute_limited_in(context, instr)
+    fn execute_limited(&self, context: &mut Context<C>) -> Result<bool, Error> {
+        self.execute_in(context, true)
     }
 }
 

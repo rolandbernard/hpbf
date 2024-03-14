@@ -158,7 +158,8 @@ fn execute_code<C: CellType>(
     }
     if let Some(exec) = exec {
         if let Some(limit) = limit {
-            exec.execute_limited(&mut cxt, limit)?;
+            cxt.budget = limit;
+            exec.execute_limited(&mut cxt)?;
         } else {
             exec.execute(&mut cxt)?;
         }

@@ -146,8 +146,9 @@ macro_rules! same_as_inplace_test_inner {
         );
         let finished_inplace;
         if $l {
-            finished_inplace = InplaceInterpreter::<u8>::create(code, 0)?
-                .execute_limited(&mut ctx_inplace, 1_000)?;
+            ctx_inplace.budget = 1_000;
+            finished_inplace =
+                InplaceInterpreter::<u8>::create(code, 0)?.execute_limited(&mut ctx_inplace)?;
         } else {
             InplaceInterpreter::<u8>::create(code, 0)?.execute(&mut ctx_inplace)?;
             finished_inplace = true;
@@ -165,7 +166,8 @@ macro_rules! same_as_inplace_test_inner {
             );
             let finished;
             if $l {
-                finished = $i::<u8>::create(code, opt)?.execute_limited(&mut ctx_to_test, 1_000)?;
+                ctx_to_test.budget = 10_000;
+                finished = $i::<u8>::create(code, opt)?.execute_limited(&mut ctx_to_test)?;
             } else {
                 $i::<u8>::create(code, opt)?.execute(&mut ctx_to_test)?;
                 finished = true;

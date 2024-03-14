@@ -81,7 +81,7 @@ impl<C: CellType> BcInterpreter<C> {
     }
 
     /// Build the context required for the threaded code interpreter.
-    fn build_context<'a>(&self, cxt: Context<'a, C>, budget: usize) -> *mut OpsContext<'a, C> {
+    fn build_context<'a>(&self, cxt: Context<'a, C>) -> *mut OpsContext<'a, C> {
         let layout = Layout::from_size_align(
             mem::size_of::<OpsContext<C>>() + mem::size_of::<C>() * self.bytecode.temps.max(2),
             mem::align_of::<OpsContext<C>>(),
@@ -92,7 +92,6 @@ impl<C: CellType> BcInterpreter<C> {
             ptr::addr_of_mut!((*ptr).min_accessed).write(self.bytecode.min_accessed);
             ptr::addr_of_mut!((*ptr).max_accessed).write(self.bytecode.max_accessed);
             ptr::addr_of_mut!((*ptr).context).write(cxt);
-            ptr::addr_of_mut!((*ptr).context.budget).write(budget);
             ptr
         }
     }
@@ -112,32 +111,17 @@ impl<C: CellType> BcInterpreter<C> {
     }
 
     /// Execute in the given context using the threaded code interpreter.
-    fn execute_in(&self, cxt: &mut Context<C>) {
+    fn execute_in(&self, cxt: &mut Context<C>, limited: bool) -> bool {
         let mut def_cxt = Context::without_io();
         mem::swap(cxt, &mut def_cxt);
-        let ops_cxt = self.build_context(def_cxt, 0);
-        let code = self.build_threaded_code(false);
-        let mut ip = code.as_ptr();
-        while !ip.is_null() {
-            // Safety: We rely on the threaded code being generated correctly.
-            unsafe { ip = enter_ops(ops_cxt, ip) };
-        }
-        let mut def_cxt = self.free_context(ops_cxt);
-        mem::swap(cxt, &mut def_cxt);
-    }
-
-    /// Execute in the given context using the threaded code interpreter.
-    fn execute_limited_in(&self, cxt: &mut Context<C>, budget: usize) -> bool {
-        let mut def_cxt = Context::without_io();
-        mem::swap(cxt, &mut def_cxt);
-        let ops_cxt = self.build_context(def_cxt, budget);
-        let code = self.build_threaded_code(true);
+        let ops_cxt = self.build_context(def_cxt);
+        let code = self.build_threaded_code(limited);
         let mut finished = true;
         let mut ip = code.as_ptr();
         while !ip.is_null() {
             // Safety: We rely on the threaded code being generated correctly.
             unsafe {
-                if (*ops_cxt).context.budget == 0 {
+                if limited && (*ops_cxt).context.budget == 0 {
                     finished = false;
                     break;
                 }
@@ -161,12 +145,12 @@ impl<'code, C: CellType> Executor<'code, C> for BcInterpreter<C> {
 
 impl<C: CellType> Executable<C> for BcInterpreter<C> {
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error> {
-        self.execute_in(context);
+        self.execute_in(context, false);
         Ok(())
     }
 
-    fn execute_limited(&self, context: &mut Context<C>, instr: usize) -> Result<bool, Error> {
-        Ok(self.execute_limited_in(context, instr))
+    fn execute_limited(&self, context: &mut Context<C>) -> Result<bool, Error> {
+        Ok(self.execute_in(context, true))
     }
 }
 

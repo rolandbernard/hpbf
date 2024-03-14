@@ -30,11 +30,12 @@ pub trait Executable<C: CellType> {
     /// Execute the executor in the given [`Context`].
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error>;
 
-    /// Like execute, but terminate after executing approximately `instr` instructions.
-    /// Not that instructions here does not have to mean Brainfuck instructions,
-    /// but some other internal format. The only important thing is that the
-    /// runtime is finite and roughly proportional to `instr`.
-    fn execute_limited(&self, context: &mut Context<C>, instr: usize) -> Result<bool, Error>;
+    /// Like execute, but terminate after the budget set in `context` is exhausted.
+    /// Note that the budge here does not have to mean number of Brainfuck instructions,
+    /// but some other internal metric. The only important thing is that the
+    /// runtime is finite and roughly proportional to the budget.
+    /// Must return true if the execution finished normally, and false if interrupted.
+    fn execute_limited(&self, context: &mut Context<C>) -> Result<bool, Error>;
 }
 
 pub trait Executor<'code, C: CellType>: Executable<C> + Sized {

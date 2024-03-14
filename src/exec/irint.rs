@@ -31,11 +31,10 @@ impl<C: CellType> IrInterpreter<C> {
     /// Execute a single block within the given program. The block does not necessary
     /// have to be part of the program, but all loops and ifs must refer to blocks
     /// within the program.
-    fn execute_block(
+    fn execute_block<const LIMITED: bool>(
         &self,
         cxt: &mut Context<C>,
         block: &Block<C>,
-        limit: &mut Option<usize>,
     ) -> Option<bool> {
         for instr in &block.insts {
             match instr {
@@ -61,32 +60,27 @@ impl<C: CellType> IrInterpreter<C> {
                         }
                     }
                 }
-                Instr::Loop { cond, block, once } => {
-                    if *once || cxt.memory.read(*cond) != C::ZERO {
-                        loop {
-                            self.execute_block(cxt, block, limit)?;
-                            cxt.memory.mov(block.shift);
-                            if let Some(lim) = limit {
-                                if *lim == 0 {
-                                    return Some(false);
-                                }
-                                *lim -= 1;
+                Instr::Loop { cond, block, .. } => {
+                    while cxt.memory.read(*cond) != C::ZERO {
+                        self.execute_block::<LIMITED>(cxt, block)?;
+                        cxt.memory.mov(block.shift);
+                        if LIMITED {
+                            if cxt.budget == 0 {
+                                return Some(false);
                             }
-                            if cxt.memory.read(*cond) == C::ZERO {
-                                break;
-                            }
+                            cxt.budget -= 1;
                         }
                     }
                 }
                 Instr::If { cond, block } => {
                     if cxt.memory.read(*cond) != C::ZERO {
-                        self.execute_block(cxt, block, limit)?;
+                        self.execute_block::<LIMITED>(cxt, block)?;
                         cxt.memory.mov(block.shift);
-                        if let Some(lim) = limit {
-                            if *lim == 0 {
+                        if LIMITED {
+                            if cxt.budget == 0 {
                                 return Some(false);
                             }
-                            *lim -= 1;
+                            cxt.budget -= 1;
                         }
                     }
                 }
@@ -106,13 +100,13 @@ impl<'p, C: CellType> Executor<'p, C> for IrInterpreter<C> {
 
 impl<C: CellType> Executable<C> for IrInterpreter<C> {
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error> {
-        self.execute_block(context, &self.program, &mut None);
+        self.execute_block::<false>(context, &self.program);
         Ok(())
     }
 
-    fn execute_limited(&self, context: &mut Context<C>, limit: usize) -> Result<bool, Error> {
+    fn execute_limited(&self, context: &mut Context<C>) -> Result<bool, Error> {
         Ok(self
-            .execute_block(context, &self.program, &mut Some(limit))
+            .execute_block::<true>(context, &self.program)
             .unwrap_or(true))
     }
 }
