@@ -350,7 +350,7 @@ unsafe fn checkr<C: CellType>(cxt: *mut OpsContext<C>, mem: *mut C) -> *mut C {
 }
 
 /// Move the memory pointer to the left until the condition is false.
-unsafe fn scanl<C: CellType>(
+unsafe fn scanl<C: CellType, const SAFE: bool>(
     cxt: *mut OpsContext<C>,
     mut mem: *mut C,
     ip: *const OpCode<C>,
@@ -360,13 +360,17 @@ unsafe fn scanl<C: CellType>(
     let cond = (*ip.add(1)).off;
     let shift = (*ip.add(2)).off;
     while *mem.offset(cond) != C::ZERO {
-        mem = checkl(cxt, mem.wrapping_offset(shift));
+        if SAFE {
+            mem = checkl(cxt, mem.wrapping_offset(shift));
+        } else {
+            mem = mem.offset(shift);
+        }
     }
     noop(cxt, mem, ip.add(2), r0, r1)
 }
 
 /// Move the memory pointer to the right until the condition is false.
-unsafe fn scanr<C: CellType>(
+unsafe fn scanr<C: CellType, const SAFE: bool>(
     cxt: *mut OpsContext<C>,
     mut mem: *mut C,
     ip: *const OpCode<C>,
@@ -376,13 +380,17 @@ unsafe fn scanr<C: CellType>(
     let cond = (*ip.add(1)).off;
     let shift = (*ip.add(2)).off;
     while *mem.offset(cond) != C::ZERO {
-        mem = checkr(cxt, mem.wrapping_offset(shift));
+        if SAFE {
+            mem = checkr(cxt, mem.wrapping_offset(shift));
+        } else {
+            mem = mem.offset(shift);
+        }
     }
     noop(cxt, mem, ip.add(2), r0, r1)
 }
 
 /// Move the memory pointer to the left and perform bounds checks.
-unsafe fn movl<C: CellType>(
+unsafe fn movl<C: CellType, const SAFE: bool>(
     cxt: *mut OpsContext<C>,
     mut mem: *mut C,
     ip: *const OpCode<C>,
@@ -390,12 +398,16 @@ unsafe fn movl<C: CellType>(
     r1: C,
 ) -> *const OpCode<C> {
     let shift = (*ip.add(1)).off;
-    mem = checkl(cxt, mem.wrapping_offset(shift));
+    if SAFE {
+        mem = checkl(cxt, mem.wrapping_offset(shift));
+    } else {
+        mem = mem.offset(shift);
+    }
     noop(cxt, mem, ip.add(1), r0, r1)
 }
 
 /// Move the memory pointer to the right and perform bounds checks.
-unsafe fn movr<C: CellType>(
+unsafe fn movr<C: CellType, const SAFE: bool>(
     cxt: *mut OpsContext<C>,
     mut mem: *mut C,
     ip: *const OpCode<C>,
@@ -403,7 +415,11 @@ unsafe fn movr<C: CellType>(
     r1: C,
 ) -> *const OpCode<C> {
     let shift = (*ip.add(1)).off;
-    mem = checkr(cxt, mem.wrapping_offset(shift));
+    if SAFE {
+        mem = checkr(cxt, mem.wrapping_offset(shift));
+    } else {
+        mem = mem.offset(shift);
+    }
     noop(cxt, mem, ip.add(1), r0, r1)
 }
 
@@ -770,7 +786,7 @@ macro_rules! op_match {
 }
 
 /// Emit a bytecode instruction into `insts`.
-pub fn emit<C: CellType>(insts: &mut Vec<OpCode<C>>, instr: Instr<C>) {
+pub fn emit<C: CellType>(insts: &mut Vec<OpCode<C>>, instr: Instr<C>, safe: bool) {
     op_match!(insts, instr, Instr::Copy, copy, r);
     op_match!(insts, instr, Instr::Add, add, r w);
     op_match!(insts, instr, Instr::Add, add2, r r);
@@ -784,18 +800,50 @@ pub fn emit<C: CellType>(insts: &mut Vec<OpCode<C>>, instr: Instr<C>) {
         }
         Instr::Scan(cond, shift) => {
             if shift < 0 {
-                insts.push(OpCode { op: scanl });
+                if safe {
+                    insts.push(OpCode {
+                        op: scanl::<_, true>,
+                    });
+                } else {
+                    insts.push(OpCode {
+                        op: scanl::<_, false>,
+                    });
+                }
             } else {
-                insts.push(OpCode { op: scanr });
+                if safe {
+                    insts.push(OpCode {
+                        op: scanr::<_, true>,
+                    });
+                } else {
+                    insts.push(OpCode {
+                        op: scanr::<_, false>,
+                    });
+                }
             }
             insts.push(OpCode { off: cond });
             insts.push(OpCode { off: shift });
         }
         Instr::Mov(shift) => {
             if shift < 0 {
-                insts.push(OpCode { op: movl });
+                if safe {
+                    insts.push(OpCode {
+                        op: movl::<_, true>,
+                    });
+                } else {
+                    insts.push(OpCode {
+                        op: movl::<_, false>,
+                    });
+                }
             } else {
-                insts.push(OpCode { op: movr });
+                if safe {
+                    insts.push(OpCode {
+                        op: movr::<_, true>,
+                    });
+                } else {
+                    insts.push(OpCode {
+                        op: movr::<_, false>,
+                    });
+                }
             }
             insts.push(OpCode { off: shift });
         }

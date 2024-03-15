@@ -223,6 +223,7 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
     fn create_mov_func_def(
         &self,
         rt_extend: FunctionValue<'cxt>,
+        safe: bool,
     ) -> Result<FunctionValue<'cxt>, BuilderError> {
         let mov = self.module.add_function(
             "hpbf_mov",
@@ -244,63 +245,71 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
         let shift = mov.get_nth_param(2).unwrap().into_int_value();
         let probe = mov.get_nth_param(3).unwrap().into_int_value();
         let entry = self.context.append_basic_block(mov, "entry");
-        let resize = self.context.append_basic_block(mov, "resize");
-        let exit = self.context.append_basic_block(mov, "exit");
-        self.builder.position_at_end(entry);
-        let new_mem_ptr = self.build_load_pointer(mem_ptr, shift, false)?;
-        let mem_base_ptr =
+        if safe {
+            let resize = self.context.append_basic_block(mov, "resize");
+            let exit = self.context.append_basic_block(mov, "exit");
+            self.builder.position_at_end(entry);
+            let new_mem_ptr = self.build_load_pointer(mem_ptr, shift, false)?;
+            let mem_base_ptr =
+                self.builder
+                    .build_struct_gep(self.cxt_type, cxt_ptr, 0, "mem_base_ptr")?;
+            let mem_base = self
+                .builder
+                .build_load(self.ptr_type, mem_base_ptr, "mem_base")?
+                .into_pointer_value();
+            let mem_size_ptr =
+                self.builder
+                    .build_struct_gep(self.cxt_type, cxt_ptr, 1, "mem_size_ptr")?;
+            let mem_size = self
+                .builder
+                .build_load(self.intptr_type, mem_size_ptr, "mem_size")?
+                .into_int_value();
+            let mem_probe = self.build_load_pointer(new_mem_ptr, probe, false)?;
+            let mem_diff =
+                self.builder
+                    .build_ptr_diff(self.int_type, mem_probe, mem_base, "mem_diff")?;
+            let is_less =
+                self.builder
+                    .build_int_compare(IntPredicate::ULT, mem_diff, mem_size, "mem_ok")?;
             self.builder
-                .build_struct_gep(self.cxt_type, cxt_ptr, 0, "mem_base_ptr")?;
-        let mem_base = self
-            .builder
-            .build_load(self.ptr_type, mem_base_ptr, "mem_base")?
-            .into_pointer_value();
-        let mem_size_ptr =
-            self.builder
-                .build_struct_gep(self.cxt_type, cxt_ptr, 1, "mem_size_ptr")?;
-        let mem_size = self
-            .builder
-            .build_load(self.intptr_type, mem_size_ptr, "mem_size")?
-            .into_int_value();
-        let mem_probe = self.build_load_pointer(new_mem_ptr, probe, false)?;
-        let mem_diff =
-            self.builder
-                .build_ptr_diff(self.int_type, mem_probe, mem_base, "mem_diff")?;
-        let is_less =
-            self.builder
-                .build_int_compare(IntPredicate::ULT, mem_diff, mem_size, "mem_ok")?;
-        self.builder
-            .build_conditional_branch(is_less, exit, resize)?;
-        self.builder.position_at_end(resize);
-        let mem_off =
-            self.builder
-                .build_ptr_diff(self.int_type, new_mem_ptr, mem_base, "mem_off")?;
-        let mem_off_ptr =
-            self.builder
-                .build_struct_gep(self.cxt_type, cxt_ptr, 2, "mem_off_ptr")?;
-        self.builder.build_store(mem_off_ptr, mem_off)?;
-        let probe_p1 =
-            self.builder
-                .build_int_add(probe, self.intptr_type.const_int(1, false), "probe_p1")?;
-        self.builder.build_call(
-            rt_extend,
-            &[cxt_ptr.into(), probe.into(), probe_p1.into()],
-            "",
-        )?;
-        let mem_base = self
-            .builder
-            .build_load(self.ptr_type, mem_base_ptr, "mem_base")?
-            .into_pointer_value();
-        let mem_off = self
-            .builder
-            .build_load(self.intptr_type, mem_off_ptr, "mem_off")?
-            .into_int_value();
-        let resized_mem_ptr = self.build_load_pointer(mem_base, mem_off, true)?;
-        self.builder.build_unconditional_branch(exit)?;
-        self.builder.position_at_end(exit);
-        let mem_ptr = self.builder.build_phi(self.ptr_type, "mem_ptr")?;
-        mem_ptr.add_incoming(&[(&new_mem_ptr, entry), (&resized_mem_ptr, resize)]);
-        self.builder.build_return(Some(&mem_ptr.as_basic_value()))?;
+                .build_conditional_branch(is_less, exit, resize)?;
+            self.builder.position_at_end(resize);
+            let mem_off =
+                self.builder
+                    .build_ptr_diff(self.int_type, new_mem_ptr, mem_base, "mem_off")?;
+            let mem_off_ptr =
+                self.builder
+                    .build_struct_gep(self.cxt_type, cxt_ptr, 2, "mem_off_ptr")?;
+            self.builder.build_store(mem_off_ptr, mem_off)?;
+            let probe_p1 = self.builder.build_int_add(
+                probe,
+                self.intptr_type.const_int(1, false),
+                "probe_p1",
+            )?;
+            self.builder.build_call(
+                rt_extend,
+                &[cxt_ptr.into(), probe.into(), probe_p1.into()],
+                "",
+            )?;
+            let mem_base = self
+                .builder
+                .build_load(self.ptr_type, mem_base_ptr, "mem_base")?
+                .into_pointer_value();
+            let mem_off = self
+                .builder
+                .build_load(self.intptr_type, mem_off_ptr, "mem_off")?
+                .into_int_value();
+            let resized_mem_ptr = self.build_load_pointer(mem_base, mem_off, true)?;
+            self.builder.build_unconditional_branch(exit)?;
+            self.builder.position_at_end(exit);
+            let mem_ptr = self.builder.build_phi(self.ptr_type, "mem_ptr")?;
+            mem_ptr.add_incoming(&[(&new_mem_ptr, entry), (&resized_mem_ptr, resize)]);
+            self.builder.build_return(Some(&mem_ptr.as_basic_value()))?;
+        } else {
+            self.builder.position_at_end(entry);
+            let new_mem_ptr = self.build_load_pointer(mem_ptr, shift, true)?;
+            self.builder.build_return(Some(&new_mem_ptr))?;
+        }
         Ok(mov)
     }
 
@@ -638,6 +647,7 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
         context: &'cxt inkwell::context::Context,
         inp: &'int LlvmJitCompiler<C>,
         has_budget: bool,
+        safe: bool,
     ) -> Result<Module<'cxt>, Error> {
         Target::initialize_native(&InitializationConfig::default()).map_err(llvm_error)?;
         let triple = TargetMachine::get_default_triple();
@@ -686,7 +696,7 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
         };
         let (rt_extend, rt_input, rt_output) = code_gen.create_runtime_func_decl();
         let mov = code_gen
-            .create_mov_func_def(rt_extend)
+            .create_mov_func_def(rt_extend, safe)
             .map_err(llvm_error)?;
         code_gen
             .compile_program(rt_input, rt_output, mov)
@@ -746,9 +756,9 @@ impl<'cxt, 'int: 'cxt, C: CellType> CodeGen<'cxt, 'int, C> {
 
 impl<C: CellType> LlvmJitCompiler<C> {
     /// Print the LLVM IR to a string and return that.
-    pub fn print_llvm_ir(&self, limit: bool) -> Result<String, Error> {
+    pub fn print_llvm_ir(&self, limit: bool, safe: bool) -> Result<String, Error> {
         let context = inkwell::context::Context::create();
-        let module = CodeGen::create(&context, self, limit)?;
+        let module = CodeGen::create(&context, self, limit, safe)?;
         Ok(module.print_to_string().to_string())
     }
 
@@ -786,9 +796,9 @@ impl<C: CellType> LlvmJitCompiler<C> {
     }
 
     /// Execute in the given context using the LLVM based JIT compiler.
-    fn execute_in(&self, cxt: &mut Context<C>, limited: bool) -> Result<bool, Error> {
+    fn execute_in(&self, cxt: &mut Context<C>, limited: bool, safe: bool) -> Result<bool, Error> {
         let context = inkwell::context::Context::create();
-        let module = CodeGen::create(&context, self, limited)?;
+        let module = CodeGen::create(&context, self, limited, safe)?;
         self.enter_jit_code(cxt, module)
     }
 }
@@ -809,11 +819,15 @@ impl<'p, C: CellType> Executor<'p, C> for LlvmJitCompiler<C> {
 
 impl<C: CellType> Executable<C> for LlvmJitCompiler<C> {
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error> {
-        self.execute_in(context, false).map(|_| ())
+        self.execute_in(context, false, true).map(|_| ())
+    }
+
+    unsafe fn execute_unsafe(&self, context: &mut Context<C>) -> Result<(), Error> {
+        self.execute_in(context, false, false).map(|_| ())
     }
 
     fn execute_limited(&self, context: &mut Context<C>) -> Result<bool, Error> {
-        self.execute_in(context, true)
+        self.execute_in(context, true, true)
     }
 }
 

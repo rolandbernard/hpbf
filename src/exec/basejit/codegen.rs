@@ -291,7 +291,7 @@ impl CodeGen {
     /// All of them are handles individually in the `match` below, with some special
     /// casing depending on the size of immediate values and whether temporaries are
     /// stored in registers of on the stack.
-    pub fn emit_program<C: CellType>(&mut self, program: &Program<C>, limited: bool) {
+    pub fn emit_program<C: CellType>(&mut self, program: &Program<C>, limited: bool, safe: bool) {
         for (i, (&instr, &live)) in program.insts.iter().zip(program.live.iter()).enumerate() {
             self.locations.push(self.code.len());
             if limited {
@@ -311,42 +311,62 @@ impl CodeGen {
                         RegMem::Reg(Reg::mem()),
                         (C::BITS / 8) as i32 * shift as i32,
                     );
-                    self.emit_lea(
-                        Reg::scr0(),
-                        RegMem::Mem(
-                            Some(Reg::mem()),
-                            None,
-                            1,
-                            (C::BITS / 8) as i32 * probe as i32,
-                        ),
-                    );
-                    self.emit_sub_r64_rm64(Reg::scr0(), RegMem::Mem(Some(Reg::cxt()), None, 1, 0));
-                    if C::BITS != 8 {
-                        self.emit_sar_r64_i8(RegMem::Reg(Reg::scr0()), (C::BITS / 8).ilog2() as u8);
+                    if safe {
+                        self.emit_lea(
+                            Reg::scr0(),
+                            RegMem::Mem(
+                                Some(Reg::mem()),
+                                None,
+                                1,
+                                (C::BITS / 8) as i32 * probe as i32,
+                            ),
+                        );
+                        self.emit_sub_r64_rm64(
+                            Reg::scr0(),
+                            RegMem::Mem(Some(Reg::cxt()), None, 1, 0),
+                        );
+                        if C::BITS != 8 {
+                            self.emit_sar_r64_i8(
+                                RegMem::Reg(Reg::scr0()),
+                                (C::BITS / 8).ilog2() as u8,
+                            );
+                        }
+                        self.emit_cmp_r64_rm64(
+                            Reg::scr0(),
+                            RegMem::Mem(Some(Reg::cxt()), None, 1, 8),
+                        );
+                        self.emit_jcc_rel8(JmpPred::Below, 0);
+                        let jmp_start = self.code.len();
+                        self.emit_mov_rm64_r64(
+                            RegMem::Mem(Some(Reg::cxt()), None, 1, 16),
+                            Reg::scr0(),
+                        );
+                        self.emit_pre_call(live);
+                        self.emit_mov_rm64_r64(RegMem::Reg(Reg::Rdi), Reg::cxt());
+                        self.emit_mov_r64_i64(Reg::Rsi, 0);
+                        self.emit_mov_r64_i64(Reg::Rdx, 1);
+                        self.emit_mov_r64_i64(Reg::scr0(), hpbf_context_extend::<C> as i64);
+                        self.emit_call_ind(RegMem::Reg(Reg::scr0()));
+                        self.emit_post_call(live);
+                        self.emit_mov_r64_rm64(
+                            Reg::mem(),
+                            RegMem::Mem(Some(Reg::cxt()), None, 1, 0),
+                        );
+                        self.emit_mov_r64_rm64(
+                            Reg::scr0(),
+                            RegMem::Mem(Some(Reg::cxt()), None, 1, 16),
+                        );
+                        self.emit_lea(
+                            Reg::mem(),
+                            RegMem::Mem(
+                                Some(Reg::mem()),
+                                Some(Reg::scr0()),
+                                C::BITS as u8 / 8,
+                                (C::BITS / 8) as i32 * -probe as i32,
+                            ),
+                        );
+                        self.code[jmp_start - 1] = (self.code.len() - jmp_start) as u8;
                     }
-                    self.emit_cmp_r64_rm64(Reg::scr0(), RegMem::Mem(Some(Reg::cxt()), None, 1, 8));
-                    self.emit_jcc_rel8(JmpPred::Below, 0);
-                    let jmp_start = self.code.len();
-                    self.emit_mov_rm64_r64(RegMem::Mem(Some(Reg::cxt()), None, 1, 16), Reg::scr0());
-                    self.emit_pre_call(live);
-                    self.emit_mov_rm64_r64(RegMem::Reg(Reg::Rdi), Reg::cxt());
-                    self.emit_mov_r64_i64(Reg::Rsi, 0);
-                    self.emit_mov_r64_i64(Reg::Rdx, 1);
-                    self.emit_mov_r64_i64(Reg::scr0(), hpbf_context_extend::<C> as i64);
-                    self.emit_call_ind(RegMem::Reg(Reg::scr0()));
-                    self.emit_post_call(live);
-                    self.emit_mov_r64_rm64(Reg::mem(), RegMem::Mem(Some(Reg::cxt()), None, 1, 0));
-                    self.emit_mov_r64_rm64(Reg::scr0(), RegMem::Mem(Some(Reg::cxt()), None, 1, 16));
-                    self.emit_lea(
-                        Reg::mem(),
-                        RegMem::Mem(
-                            Some(Reg::mem()),
-                            Some(Reg::scr0()),
-                            C::BITS as u8 / 8,
-                            (C::BITS / 8) as i32 * -probe as i32,
-                        ),
-                    );
-                    self.code[jmp_start - 1] = (self.code.len() - jmp_start) as u8;
                 }
                 Instr::Inp(dst) => {
                     self.emit_pre_call(live);

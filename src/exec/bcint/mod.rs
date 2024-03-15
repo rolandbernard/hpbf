@@ -48,7 +48,7 @@ pub struct OpsContext<'cxt, C: CellType> {
 
 impl<C: CellType> BcInterpreter<C> {
     /// Generate, from the bytecode, the corresponding threaded code.
-    fn build_threaded_code(&self, limited: bool) -> Vec<OpCode<C>> {
+    fn build_threaded_code(&self, limited: bool, safe: bool) -> Vec<OpCode<C>> {
         let mut inst_offset = Vec::with_capacity(self.bytecode.insts.len() + 1);
         let mut inst_start = Vec::with_capacity(self.bytecode.insts.len() + 1);
         let mut insts = Vec::new();
@@ -65,7 +65,7 @@ impl<C: CellType> BcInterpreter<C> {
                 }
             }
             inst_offset.push(insts.len());
-            emit(&mut insts, inst);
+            emit(&mut insts, inst, safe);
         }
         inst_start.push(insts.len());
         inst_offset.push(insts.len());
@@ -111,11 +111,11 @@ impl<C: CellType> BcInterpreter<C> {
     }
 
     /// Execute in the given context using the threaded code interpreter.
-    fn execute_in(&self, cxt: &mut Context<C>, limited: bool) -> bool {
+    fn execute_in(&self, cxt: &mut Context<C>, limited: bool, safe: bool) -> bool {
         let mut def_cxt = Context::without_io();
         mem::swap(cxt, &mut def_cxt);
         let ops_cxt = self.build_context(def_cxt);
-        let code = self.build_threaded_code(limited);
+        let code = self.build_threaded_code(limited, safe);
         let mut finished = true;
         let mut ip = code.as_ptr();
         while !ip.is_null() {
@@ -145,12 +145,17 @@ impl<'code, C: CellType> Executor<'code, C> for BcInterpreter<C> {
 
 impl<C: CellType> Executable<C> for BcInterpreter<C> {
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error> {
-        self.execute_in(context, false);
+        self.execute_in(context, false, true);
+        Ok(())
+    }
+
+    unsafe fn execute_unsafe(&self, context: &mut Context<C>) -> Result<(), Error> {
+        self.execute_in(context, false, false);
         Ok(())
     }
 
     fn execute_limited(&self, context: &mut Context<C>) -> Result<bool, Error> {
-        Ok(self.execute_in(context, true))
+        Ok(self.execute_in(context, true, true))
     }
 }
 

@@ -68,6 +68,7 @@ fn print_help_text() {
     #[cfg(feature = "llvm")]
     println!("   --llvm-jit       Use the optimizing LLVM JIT compiler");
     println!("   --limit limit    Limit the number of instructions executed");
+    println!("   --static         Do not perform memory bounds check, static memory size");
     println!("   -h,--help        Print this help text");
     println!("Arguments:");
     println!("   code             Execute the code given in the argument");
@@ -102,6 +103,7 @@ fn execute_code<C: CellType>(
     kind: ExecutorKind,
     opt: u32,
     limit: Option<usize>,
+    safe: bool,
 ) -> Result<(), Error> {
     let mut cxt = Context::<C>::with_stdio();
     let exec: Option<Box<dyn Executable<C>>>;
@@ -138,7 +140,9 @@ fn execute_code<C: CellType>(
         #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
         ExecutorKind::PrintMc => {
             let int = BaseJitCompiler::<C>::create(code, opt)?;
-            stdout().write_all(&int.print_mc(limit.is_some())).unwrap();
+            stdout()
+                .write_all(&int.print_mc(limit.is_some(), safe))
+                .unwrap();
             exec = None;
         }
         #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -148,7 +152,7 @@ fn execute_code<C: CellType>(
         #[cfg(feature = "llvm")]
         ExecutorKind::PrintLlvm => {
             let int = LlvmJitCompiler::<C>::create(code, opt)?;
-            println!("{}", int.print_llvm_ir(limit.is_some())?);
+            println!("{}", int.print_llvm_ir(limit.is_some(), safe)?);
             exec = None;
         }
         #[cfg(feature = "llvm")]
@@ -160,8 +164,12 @@ fn execute_code<C: CellType>(
         if let Some(limit) = limit {
             cxt.budget = limit;
             exec.execute_limited(&mut cxt)?;
-        } else {
+        } else if safe {
             exec.execute(&mut cxt)?;
+        } else {
+            // Just allocate 512 MiB and hope for the best.
+            cxt.memory.make_accessible(-268_435_456, 268_435_456);
+            unsafe { exec.execute_unsafe(&mut cxt)? };
         }
     }
     Ok(())
@@ -173,6 +181,7 @@ fn main() {
     let mut kind = ExecutorKind::BcInt;
     let mut opt = 2;
     let mut limit = None;
+    let mut safe = true;
     let mut has_error = false;
     let mut next_is_file = false;
     let mut next_is_limit = false;
@@ -236,6 +245,7 @@ fn main() {
                 "-h" | "-help" | "--help" => print_help = true,
                 "-f" | "-file" | "--file" => next_is_file = true,
                 "--limit" => next_is_limit = true,
+                "--static" => safe = false,
                 _ => code.push_str(&arg),
             }
         }
@@ -250,10 +260,10 @@ fn main() {
         print_help_text();
     } else if !has_error {
         if let Err(error) = match bits {
-            8 => execute_code::<u8>(&code, kind, opt, limit),
-            16 => execute_code::<u16>(&code, kind, opt, limit),
-            32 => execute_code::<u32>(&code, kind, opt, limit),
-            64 => execute_code::<u64>(&code, kind, opt, limit),
+            8 => execute_code::<u8>(&code, kind, opt, limit, safe),
+            16 => execute_code::<u16>(&code, kind, opt, limit, safe),
+            32 => execute_code::<u32>(&code, kind, opt, limit, safe),
+            64 => execute_code::<u64>(&code, kind, opt, limit, safe),
             _ => panic!("unsupported cell size"),
         } {
             print_error(error);

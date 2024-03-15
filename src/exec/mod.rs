@@ -30,6 +30,11 @@ pub trait Executable<C: CellType> {
     /// Execute the executor in the given [`Context`].
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error>;
 
+    /// Execute the executor in the given [`Context`] without performing memory bounds checks.
+    unsafe fn execute_unsafe(&self, context: &mut Context<C>) -> Result<(), Error> {
+        self.execute(context)
+    }
+
     /// Like execute, but terminate after the budget set in `context` is exhausted.
     /// Note that the budge here does not have to mean number of Brainfuck instructions,
     /// but some other internal metric. The only important thing is that the
