@@ -5,6 +5,7 @@ use std::{
     fs::File,
     io::{stdout, Read, Write},
     process::exit,
+    time::Instant,
 };
 
 use hpbf::{
@@ -69,6 +70,7 @@ fn print_help_text() {
     println!("   --llvm-jit       Use the optimizing LLVM JIT compiler");
     println!("   --limit limit    Limit the number of instructions executed");
     println!("   --static         Do not perform memory bounds check, static memory size");
+    println!("   --time           Output the time required starting after parsing this argument.");
     println!("   -h,--help        Print this help text");
     println!("Arguments:");
     println!("   code             Execute the code given in the argument");
@@ -193,6 +195,7 @@ fn main() {
     let mut has_error = false;
     let mut next_is_file = false;
     let mut next_is_limit = false;
+    let mut time = None;
     let mut code = String::new();
     for arg in env::args().skip(1) {
         if next_is_file {
@@ -254,6 +257,7 @@ fn main() {
                 "-f" | "-file" | "--file" => next_is_file = true,
                 "--limit" => next_is_limit = true,
                 "--static" => safe = false,
+                "--time" => time = Some(Instant::now()),
                 _ => code.push_str(&arg),
             }
         }
@@ -277,6 +281,10 @@ fn main() {
             print_error(error);
             has_error = true;
         }
+    }
+    if let Some(start) = time {
+        let duration = Instant::now().duration_since(start);
+        println!("time: {duration:?}");
     }
     if has_error {
         exit(1)
