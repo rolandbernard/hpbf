@@ -11,7 +11,7 @@ name = "optimizer"
 harness = false
 
 [features]
-default = ["llvm"]
+default = []
 llvm = ["dep:inkwell"]
 
 [dependencies]

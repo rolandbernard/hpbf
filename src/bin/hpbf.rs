@@ -178,7 +178,15 @@ fn execute_code<C: CellType>(
 fn main() {
     let mut bits = 8;
     let mut print_help = false;
-    let mut kind = ExecutorKind::BcInt;
+    let mut kind;
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    {
+        kind = ExecutorKind::BaseJit;
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_family = "unix")))]
+    {
+        kind = ExecutorKind::BcInt;
+    }
     let mut opt = 2;
     let mut limit = None;
     let mut safe = true;
