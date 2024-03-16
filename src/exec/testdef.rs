@@ -347,6 +347,11 @@ macro_rules! same_as_inplace_tests {
                 "+>><<[.>-[]]",
                 empty_infinite_loop_inside_other_loop
             );
+            same_as_inplace_test_limited!(
+                $i,
+                ",[>+<+]+[[+].-]",
+                zeroing_cannot_be_pulled_out_of_loop
+            );
 
             // Manually created test cases.
             same_as_inplace_test_no_miri!(

@@ -93,6 +93,7 @@ pub struct CodeGen<C: CellType> {
     values: HashMap<GvnExpr<C>, usize>,
     insts: Vec<Instr<C>>,
     live: Vec<u16>,
+    is_target: Vec<bool>,
     current_start: usize,
     outer_accessed: Vec<usize>,
 }
@@ -352,6 +353,17 @@ impl<C: CellType> CodeGen<C> {
                     }
                     block_idx += 1;
                 }
+            }
+        }
+    }
+
+    /// Record the instructions that are targets of branch instructions. Required
+    /// for correctness of the zeroing move merging pass.
+    fn record_branch_targets(&mut self) {
+        self.is_target.resize(self.insts.len() + 1, false);
+        for (i, &inst) in self.insts.iter().enumerate() {
+            if let Instr::BrNZ(_, off) | Instr::BrZ(_, off) = inst {
+                self.is_target[i.wrapping_add_signed(off)] = true;
             }
         }
     }
@@ -730,6 +742,9 @@ impl<C: CellType> CodeGen<C> {
                     zerod.remove(mem);
                 }
             }
+            if self.is_target[i] {
+                zerod.clear();
+            }
         }
     }
 
@@ -800,6 +815,7 @@ impl<C: CellType> CodeGen<C> {
             values: HashMap::new(),
             insts: Vec::new(),
             live: Vec::new(),
+            is_target: Vec::new(),
             current_start: 0,
             outer_accessed: Vec::new(),
         };
@@ -808,6 +824,7 @@ impl<C: CellType> CodeGen<C> {
         codegen.allocate_temps(num_regs);
         codegen.parameter_reordering();
         if fuse {
+            codegen.record_branch_targets();
             codegen.zeroing_move_detection();
         }
         codegen.strip_noops();
