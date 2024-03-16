@@ -49,7 +49,7 @@ impl<'code, C: CellType> InplaceInterpreter<'code, C> {
                         .write(0, cxt.memory.read(0).wrapping_add(C::NEG_ONE));
                 }
                 b'.' => {
-                    if let None = cxt.output(cxt.memory.read(0).into_u8()) {
+                    if cxt.output(cxt.memory.read(0).into_u8()).is_none() {
                         return Ok(true);
                     }
                 }
