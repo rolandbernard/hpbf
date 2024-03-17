@@ -1,6 +1,8 @@
 # High-performance Brainfuck
 
-This is a fast virtual machine for Brainfuck.
+This is a fast virtual machine for Brainfuck. This is as useless as it sounds,
+but it was fun to implement and debug, and that is what counts.
+
 
 ## Features
 
@@ -78,7 +80,7 @@ flowchart TD
     bc --> bcint(Bytecode interpreter)
     bc -->|Baseline compiler| mc
     mc[Machine code] --> jit(JIT execution)
-    ir -->|LLVM generator| llvm
+    ir -->|LLVM IR generator| llvm
     llvm[LLVM IR] -->|LLVM| llvm
     llvm -->|LLVM| mc
 ```
@@ -165,7 +167,6 @@ balanced. Imbalanced loops cause the optimization to perform poorly, because it 
 easily eliminate the loops.
 
 The program above for example will be optimized to the following:
-
 ```
 [1] += [0]
 [0] += [2]
@@ -189,14 +190,14 @@ loop [-1] {
 
 While the above program is reasonably optimized, the data structures of the internal
 IR are not optimized for fast interpretation. For this reason, the IR can be transformed
-into a bytecode format, that can than be interpreted much faster. The bytecode generator
-also performs some optimizations, like instruction fusion, dead store elimination,
-global value numbering, and register allocation. Further, in the bytecode all ifs and
-loops are encoded as relative branches, allowing for the bytecode to be one flat array
-of instruction.
+into a bytecode format, that can than be interpreted much faster. Since some instructions
+in the IR require temporary variables to be computed, the bytecode includes, in addition
+to the normal memory addresses also a few temporaries. Further, in the bytecode
+all ifs and loops are encoded as relative branches, allowing for the bytecode to be one
+flat array of instruction. The bytecode generator also performs some optimizations, like
+instruction fusion, dead store elimination, global value numbering, and register allocation.
 
-The optimized program above will be generate to the following bytecode:
-
+The optimized program above will generate to the following bytecode:
 ```
 ; temps 2
 ; min -65
@@ -222,11 +223,83 @@ The optimized program above will be generate to the following bytecode:
 .L280
 ```
 
+The above bytecode can then be interpreted using the bytecode interpreter. The interpreter
+used direct threading with functions for each operation that have the following signature.
+```rust
+type Op<C> = unsafe fn(
+    cxt: *mut OpsContext<C>,
+    mem: *mut C,
+    ip: *const OpCode<C>,
+    r0: C,
+    r1: C,
+) -> *const OpCode<C>;
+```
+By exploiting trail call optimization, this allows for implementing a fast interpreter.
+
 
 ### Generating LLVM IR
 
+Instead of generating bytecode from the internal IR, the virtual machine also supports
+the translation to LLVM IR. After translating to LLVM IR, the LLVM optimization and JIT
+compiler infrastructure can be employed to optimize, compiler, and run the program.
+
 
 ### Compiling to native machine code
+
+While the LLVM based JIT backend produces fast machine code, it does so at a considerable
+compile time. This means that for large programs, it is often faster to use the bytecode
+interpreter instead of the LLVM JIT compiler. For this reason, the virtual machine
+includes also a baseline compiler that uses the bytecode infrastructure and then
+generates machine code from the bytecode program.
+
+The optimized program above will generate to the following machine code:
+```
+55                   push   %rbp
+53                   push   %rbx
+41 54                push   %r12
+41 55                push   %r13
+41 56                push   %r14
+41 57                push   %r15
+48 83 ec 18          sub    $0x18,%rsp
+48 8b df             mov    %rdi,%rbx
+48 8b ee             mov    %rsi,%rbp
+44 0f b6 65 00       movzbl 0x0(%rbp),%r12d
+44 00 65 01          add    %r12b,0x1(%rbp)
+44 02 65 02          add    0x2(%rbp),%r12b
+44 88 65 00          mov    %r12b,0x0(%rbp)
+c6 45 02 00          movb   $0x0,0x2(%rbp)
+80 7d ff 00          cmpb   $0x0,-0x1(%rbp)
+0f 84 4a 00 00 00    je     0x130d
+44 0f b6 6d 01       movzbl 0x1(%rbp),%r13d
+44 88 6d 02          mov    %r13b,0x2(%rbp)
+fe 45 04             incb   0x4(%rbp)
+80 7d 02 00          cmpb   $0x0,0x2(%rbp)
+0f 84 08 00 00 00    je     0x12e1
+c6 45 02 00          movb   $0x0,0x2(%rbp)
+c6 45 04 00          movb   $0x0,0x4(%rbp)
+44 0f b6 75 04       movzbl 0x4(%rbp),%r14d
+4d 0f af f4          imul   %r12,%r14
+49 ff ce             dec    %r14
+44 02 75 03          add    0x3(%rbp),%r14b
+4d 03 ee             add    %r14,%r13
+44 88 6d 01          mov    %r13b,0x1(%rbp)
+c6 45 03 00          movb   $0x0,0x3(%rbp)
+c6 45 04 00          movb   $0x0,0x4(%rbp)
+fe 4d ff             decb   -0x1(%rbp)
+80 7d ff 00          cmpb   $0x0,-0x1(%rbp)
+0f 85 b6 ff ff ff    jne    0x12c3
+c7 c0 01 00 00 00    mov    $0x1,%eax
+eb 06                jmp    0x131b
+c7 c0 00 00 00 00    mov    $0x0,%eax
+48 83 c4 18          add    $0x18,%rsp
+41 5f                pop    %r15
+41 5e                pop    %r14
+41 5d                pop    %r13
+41 5c                pop    %r12
+5b                   pop    %rbx
+5d                   pop    %rbp
+c3                   ret
+```
 
 
 ## Usage
