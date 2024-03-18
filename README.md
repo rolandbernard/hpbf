@@ -104,7 +104,7 @@ so skipped loops will still have to iterate over all instructions in the loop.
 The first step to improving the execution performance is to transform the Brainfuck
 program into a representation that is more amenable to optimization. During this translation,
 the implementation already coalesces increment instructions to the same cell, detects
-loops such as `[-]` or `[+]` and delays moves until the end of a basic block. The result
+loops such as `[-]` or `[+]`, and delays moves until the end of a basic block. The result
 of the IR building step for the above program is the following:
 
 ```
@@ -157,12 +157,12 @@ still possible to significantly optimize this code.
 ### Optimizing the internal IR
 
 Clearly there is still much room for optimization. For example, a loop like the following
-`[>+<-.]` could be replaced `[1] = [0]` and `[0] = 0`. The IR interpreter is a little
+`[>+<-]` could be replaced by `[1] = [0]` and `[0] = 0`. The IR optimizer is a little
 more sophisticated than that, but in principle, it performs mainly conditional constant
 propagation, loop analysis, and dead code elimination. The IR optimizer performs multiple
-passes over the IR, that all perform the same operation. The first pass is performed without
+passes over the IR, that all perform the same operations. The first pass is performed without
 any analysis result, and all subsequent passes use the analysis results that were computed
-in the previous pass. The optimizer is particularly effective for cases where loops are
+in the previous passes. The optimizer is particularly effective for cases where loops are
 balanced. Imbalanced loops cause the optimization to perform poorly, because it can not
 easily eliminate the loops.
 
@@ -193,11 +193,11 @@ IR are not optimized for fast interpretation. For this reason, the IR can be tra
 into a bytecode format, that can than be interpreted much faster. Since some instructions
 in the IR require temporary variables to be computed, the bytecode includes, in addition
 to the normal memory addresses also a few temporaries. Further, in the bytecode
-all ifs and loops are encoded as relative branches, allowing for the bytecode to be one
+all ifs and loops are encoded as relative branches, allowing the bytecode to be represented with one
 flat array of instruction. The bytecode generator also performs some optimizations, like
 instruction fusion, dead store elimination, global value numbering, and register allocation.
 
-The optimized program above will generate to the following bytecode:
+The optimized program above will generate the following bytecode:
 ```
 ; temps 2
 ; min -65
@@ -241,18 +241,18 @@ By exploiting trail call optimization, this allows for implementing a fast inter
 
 Instead of generating bytecode from the internal IR, the virtual machine also supports
 the translation to LLVM IR. After translating to LLVM IR, the LLVM optimization and JIT
-compiler infrastructure can be employed to optimize, compiler, and run the program.
+compiler infrastructure can be employed to optimize, compile, and run the program.
 
 
 ### Compiling to native machine code
 
 While the LLVM based JIT backend produces fast machine code, it does so at a considerable
-compile time. This means that for large programs, it is often faster to use the bytecode
+compile time cost. This means that for large programs, it is often faster to use the bytecode
 interpreter instead of the LLVM JIT compiler. For this reason, the virtual machine
 includes also a baseline compiler that uses the bytecode infrastructure and then
 generates machine code from the bytecode program.
 
-The optimized program above will generate to the following machine code:
+The optimized program above will generate the following machine code:
 ```
 55                   push   %rbp
 53                   push   %rbx
