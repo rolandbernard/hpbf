@@ -107,7 +107,7 @@ the implementation already coalesces increment instructions to the same cell, de
 loops such as `[-]` or `[+]`, and delays moves until the end of a basic block. The result
 of the IR building step for the above program is the following:
 
-```
+```rust
 loop [0] {
   [0] -= 1
   [1] += 1
@@ -167,7 +167,7 @@ balanced. Imbalanced loops cause the optimization to perform poorly, because it 
 easily eliminate the loops.
 
 The program above for example will be optimized to the following:
-```
+```rust
 [1] += [0]
 [0] += [2]
 [2] = 0
@@ -198,7 +198,7 @@ flat array of instruction. The bytecode generator also performs some optimizatio
 instruction fusion, dead store elimination, global value numbering, and register allocation.
 
 The optimized program above will generate the following bytecode:
-```
+```assembly
 ; temps 2
 ; min -65
 ; max 65
@@ -253,7 +253,7 @@ includes also a baseline compiler that uses the bytecode infrastructure and then
 generates machine code from the bytecode program.
 
 The optimized program above will generate the following machine code:
-```
+```assembly
 55                   push   %rbp
 53                   push   %rbx
 41 54                push   %r12
