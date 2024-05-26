@@ -1,7 +1,6 @@
 # High-performance Brainfuck
 
-This is a fast virtual machine for Brainfuck. This is as useless as it sounds,
-but it was fun to implement and debug, and that is what counts.
+This is a fast virtual machine for Brainfuck. This is as useless as it sounds.
 
 
 ## Features
