@@ -175,8 +175,11 @@ impl<'a, C: CellType> Context<'a, C> {
     pub fn input(&mut self) -> Option<u8> {
         if let Some(input) = &mut self.input {
             let mut result = [0];
-            input.read(&mut result).ok()?;
-            Some(result[0])
+            if input.read(&mut result).ok()? == 0 {
+                Some(0)
+            } else {
+                Some(result[0])
+            }
         } else {
             None
         }

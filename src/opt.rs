@@ -373,33 +373,39 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
     fn gather_to_emit_dfs(
         &mut self,
         var: isize,
-        depth: usize,
+        index: &mut usize,
         visited: &mut HashMap<isize, usize>,
-        stack: &mut Vec<(isize, Expr<C>)>,
+        stack: &mut Vec<(isize, Option<Expr<C>>)>,
         comps: &mut Vec<SmallVec<(isize, Expr<C>), 1>>,
     ) -> usize {
-        visited.insert(var, depth);
+        let cur_index = *index;
+        *index += 1;
+        visited.insert(var, cur_index);
         let stack_len = stack.len();
-        let mut low = depth;
+        let mut low = cur_index;
         if let Some(next) = self.reverse.get(&var) {
             for n in next.iter().copied().collect::<Vec<_>>() {
                 if let Some(v) = visited.get(&n) {
                     low = low.min(*v);
                 } else {
-                    let reached = self.gather_to_emit_dfs(n, depth + 1, visited, stack, comps);
+                    let reached = self.gather_to_emit_dfs(n, index, visited, stack, comps);
                     low = low.min(reached);
                 }
             }
         }
-        if let Some(pending) = self.remove_pending(var) {
-            stack.push((var, pending));
-        }
-        if low == depth && stack.len() != stack_len {
+        stack.push((var, self.remove_pending(var)));
+        if low == cur_index {
             let mut new_comp = SmallVec::with_capacity(stack.len() - stack_len);
             while stack.len() != stack_len {
-                new_comp.push(stack.pop().unwrap());
+                let elem = stack.pop().unwrap();
+                visited.insert(elem.0, usize::MAX);
+                if let Some(expr) = elem.1 {
+                    new_comp.push((elem.0, expr));
+                }
             }
-            comps.push(new_comp);
+            if !new_comp.is_empty() {
+                comps.push(new_comp);
+            }
         }
         return low;
     }
@@ -422,7 +428,7 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
             let mut stack = Vec::with_capacity(4);
             for &var in emit {
                 if !visited.contains_key(&var) {
-                    self.gather_to_emit_dfs(var, 0, &mut visited, &mut stack, &mut comps);
+                    self.gather_to_emit_dfs(var, &mut 0, &mut visited, &mut stack, &mut comps);
                 }
             }
         }
