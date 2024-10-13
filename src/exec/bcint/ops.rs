@@ -809,16 +809,14 @@ pub fn emit<C: CellType>(insts: &mut Vec<OpCode<C>>, instr: Instr<C>, safe: bool
                         op: scanl::<_, false>,
                     });
                 }
+            } else if safe {
+                insts.push(OpCode {
+                    op: scanr::<_, true>,
+                });
             } else {
-                if safe {
-                    insts.push(OpCode {
-                        op: scanr::<_, true>,
-                    });
-                } else {
-                    insts.push(OpCode {
-                        op: scanr::<_, false>,
-                    });
-                }
+                insts.push(OpCode {
+                    op: scanr::<_, false>,
+                });
             }
             insts.push(OpCode { off: cond });
             insts.push(OpCode { off: shift });
@@ -834,16 +832,14 @@ pub fn emit<C: CellType>(insts: &mut Vec<OpCode<C>>, instr: Instr<C>, safe: bool
                         op: movl::<_, false>,
                     });
                 }
+            } else if safe {
+                insts.push(OpCode {
+                    op: movr::<_, true>,
+                });
             } else {
-                if safe {
-                    insts.push(OpCode {
-                        op: movr::<_, true>,
-                    });
-                } else {
-                    insts.push(OpCode {
-                        op: movr::<_, false>,
-                    });
-                }
+                insts.push(OpCode {
+                    op: movr::<_, false>,
+                });
             }
             insts.push(OpCode { off: shift });
         }

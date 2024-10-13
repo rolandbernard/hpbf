@@ -44,7 +44,7 @@ fn generate_code(hasher: &mut impl Hasher, max_len: usize) -> String {
     for _ in 0..open {
         str.push(']');
     }
-    return str;
+    str
 }
 
 /// Execute the code and terminate after either reading or writing a certain
@@ -63,7 +63,7 @@ fn result_with<'code, C: CellType, E: Executor<'code, C>>(
     context.budget = 10_000;
     let finished = exec.execute_limited(&mut context).unwrap();
     drop(context);
-    return (finished, output);
+    (finished, output)
 }
 
 /// Compare that the two execution results. Since the execution might have been
@@ -84,7 +84,7 @@ fn compare_results(a: &(bool, Vec<u8>), b: &(bool, Vec<u8>)) -> bool {
                 return false;
             }
         }
-        return true;
+        true
     }
 }
 
@@ -129,7 +129,7 @@ fn check_code<'code, C: CellType>(code: &'code str) -> bool {
     {
         return false;
     }
-    return true;
+    true
 }
 
 /// Delete some random instructions such that the code still fails.
@@ -186,7 +186,7 @@ fn minimize_code(hasher: &mut impl Hasher, code: String) -> String {
             return minimize_code(hasher, next);
         }
     }
-    return code;
+    code
 }
 
 /// Print the current number of successful and failed code samples.
@@ -196,7 +196,7 @@ fn print_status(success: usize, failure: usize) {
 
 /// Print the CLI help text for this program to stdout.
 fn print_help_text() {
-    println!("Usage: {} [option]", env::args().nth(0).unwrap());
+    println!("Usage: {} [option]", env::args().next().unwrap());
     println!("Options:");
     println!("   --recheck          Run again all the stored failed examples");
     println!("   --minimize file    Run the example in file and try to make it smaller");

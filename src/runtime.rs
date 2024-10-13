@@ -80,7 +80,7 @@ impl<C: CellType> Memory<C> {
         let start_ptr = (self.offset as isize).wrapping_add(start);
         let end_ptr = (self.offset as isize).wrapping_add(end);
         let needed_below = if start_ptr < 0 {
-            start_ptr.abs() as usize
+            start_ptr.unsigned_abs()
         } else {
             0
         };
@@ -197,6 +197,12 @@ impl<'a, C: CellType> Context<'a, C> {
         } else {
             Some(())
         }
+    }
+}
+
+impl<C: CellType> Default for Memory<C> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -128,6 +128,12 @@ impl<K: Eq + Hash> HashSet<K> {
     }
 }
 
+impl<K: Eq + Hash, V> Default for HashMap<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K: Eq + Hash, V> Deref for HashMap<K, V> {
     type Target = InnerHashMap<K, V>;
 
@@ -139,6 +145,12 @@ impl<K: Eq + Hash, V> Deref for HashMap<K, V> {
 impl<K: Eq + Hash, V> DerefMut for HashMap<K, V> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
+    }
+}
+
+impl<K: Eq + Hash> Default for HashSet<K> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

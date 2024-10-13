@@ -1,6 +1,9 @@
 //! Contains parsing and some optimizing transformations for a Brainfuck program.
 
-use std::fmt::{self, Debug};
+use std::{
+    cmp::Ordering,
+    fmt::{self, Debug},
+};
 
 use crate::{
     hasher::{HashMap, HashSet},
@@ -206,13 +209,13 @@ impl<C: CellType> Expr<C> {
                 }
             }
         }
-        return self;
+        self
     }
 
     /// Multiply two expressions and return the resulting expressions.
     pub fn mul(&self, other: impl AsRef<Self> + Into<Self>) -> Self {
         if self.parts.is_empty() || other.as_ref().parts.is_empty() {
-            return Expr::val(C::ZERO);
+            Expr::val(C::ZERO)
         } else if self.parts.len() == 1 {
             let mut res = other.into();
             res.parts.retain_mut(|ExprPart { coef, vars }| {
@@ -220,7 +223,7 @@ impl<C: CellType> Expr<C> {
                 *coef = coef.wrapping_mul(self.parts[0].coef);
                 *coef != C::ZERO
             });
-            return res;
+            res
         } else if other.as_ref().parts.len() == 1 {
             let mut res = self.clone();
             res.parts.retain_mut(|ExprPart { coef, vars }| {
@@ -228,7 +231,7 @@ impl<C: CellType> Expr<C> {
                 *coef = coef.wrapping_mul(other.as_ref().parts[0].coef);
                 *coef != C::ZERO
             });
-            return res;
+            res
         } else {
             let mut parts = HashMap::with_capacity(self.parts.len() * other.as_ref().parts.len());
             for self_part in &self.parts {
@@ -258,24 +261,28 @@ impl<C: CellType> Expr<C> {
         let (mut i, mut j) = (0, 0);
         let mut parts = SmallVec::new();
         while i < self.parts.len() && j < other.as_ref().parts.len() {
-            if self.parts[i].vars < other.as_ref().parts[j].vars {
-                parts.push(self.parts[i].clone());
-                i += 1;
-            } else if self.parts[i].vars > other.as_ref().parts[j].vars {
-                parts.push(other.as_ref().parts[j].clone());
-                j += 1;
-            } else {
-                let coef = self.parts[i]
-                    .coef
-                    .wrapping_add(other.as_ref().parts[j].coef);
-                if coef != C::ZERO {
-                    parts.push(ExprPart {
-                        coef,
-                        vars: self.parts[i].vars.clone(),
-                    });
+            match self.parts[i].vars.cmp(&other.as_ref().parts[j].vars) {
+                Ordering::Less => {
+                    parts.push(self.parts[i].clone());
+                    i += 1;
                 }
-                i += 1;
-                j += 1;
+                Ordering::Greater => {
+                    parts.push(other.as_ref().parts[j].clone());
+                    j += 1;
+                }
+                Ordering::Equal => {
+                    let coef = self.parts[i]
+                        .coef
+                        .wrapping_add(other.as_ref().parts[j].coef);
+                    if coef != C::ZERO {
+                        parts.push(ExprPart {
+                            coef,
+                            vars: self.parts[i].vars.clone(),
+                        });
+                    }
+                    i += 1;
+                    j += 1;
+                }
             }
         }
         while i < self.parts.len() {
@@ -522,7 +529,7 @@ impl<C: CellType> Expr<C> {
     }
 
     /// Return the variables but grouped by multiplication.
-    pub fn grouped_vars<'a>(&'a self) -> impl Iterator<Item = &'a SmallVec<isize, 1>> + 'a {
+    pub fn grouped_vars(&self) -> impl Iterator<Item = &SmallVec<isize, 1>> {
         self.parts.iter().map(|part| &part.vars)
     }
 
@@ -547,7 +554,7 @@ impl<C: CellType> Expr<C> {
             }
             val = val.wrapping_add(part_val);
         }
-        return val;
+        val
     }
 
     /// Multiply the two expressions continuing the given parts.
@@ -558,10 +565,10 @@ impl<C: CellType> Expr<C> {
     ) -> SmallVec<ExprPart<C>, 2> {
         if left.is_empty() {
             right.clear();
-            return right;
+            right
         } else if right.is_empty() {
             left.clear();
-            return left;
+            left
         } else if left.len() == 1 {
             right.retain_mut(|ExprPart { vars, coef }| {
                 vars.extend(left[0].vars.iter().copied());
@@ -569,7 +576,7 @@ impl<C: CellType> Expr<C> {
                 *coef = coef.wrapping_mul(left[0].coef);
                 *coef != C::ZERO
             });
-            return right;
+            right
         } else if right.len() == 1 {
             left.retain_mut(|ExprPart { vars, coef }| {
                 vars.extend(right[0].vars.iter().copied());
@@ -577,7 +584,7 @@ impl<C: CellType> Expr<C> {
                 *coef = coef.wrapping_mul(right[0].coef);
                 *coef != C::ZERO
             });
-            return left;
+            left
         } else {
             let mut new_partial = HashMap::new();
             for ExprPart { vars, coef } in right {
@@ -596,7 +603,7 @@ impl<C: CellType> Expr<C> {
                     .filter(|(_, coef)| *coef != C::ZERO)
                     .map(|(vars, coef)| ExprPart { coef, vars }),
             );
-            return left;
+            left
         }
     }
 
@@ -708,12 +715,12 @@ impl<C: CellType> Expr<C> {
     }
 
     /// Return an iterator over all the variables used in this expression.
-    pub fn variables<'a>(&'a self) -> impl Iterator<Item = isize> + 'a {
+    pub fn variables(&self) -> impl Iterator<Item = isize> + '_ {
         self.parts.iter().flat_map(|part| part.vars.iter()).copied()
     }
 
     /// Return an iterator over all the variables used in this expression.
-    pub fn variables_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut isize> + 'a {
+    pub fn variables_mut(&mut self) -> impl Iterator<Item = &mut isize> {
         self.parts.iter_mut().flat_map(|part| part.vars.iter_mut())
     }
 }
@@ -788,7 +795,7 @@ impl<C: CellType> Program<C> {
     /// );
     /// # Ok::<(), Error>(())
     /// ```
-    pub fn parse<'str>(program: &'str str) -> Result<Self, Error> {
+    pub fn parse(program: &str) -> Result<Self, Error> {
         let mut stack = vec![(0, false, Vec::new(), HashMap::new())];
         let mut positions = vec![];
         for (i, char) in program.chars().enumerate() {
@@ -826,7 +833,7 @@ impl<C: CellType> Program<C> {
                     stack.push((cond, false, Vec::new(), HashMap::new()));
                 }
                 ']' => {
-                    if positions.len() == 0 {
+                    if positions.is_empty() {
                         return Err(Error {
                             kind: ErrorKind::LoopNotOpened,
                             str: program.to_owned(),
@@ -905,7 +912,7 @@ impl<C: CellType> Program<C> {
                 insts.push(Instr::add(var, val));
             }
         }
-        return Ok(Block { shift, insts });
+        Ok(Block { shift, insts })
     }
 }
 
@@ -1071,9 +1078,9 @@ impl<C: CellType> AsRef<Expr<C>> for Expr<C> {
     }
 }
 
-impl<C: CellType> Into<Expr<C>> for &Expr<C> {
-    fn into(self) -> Expr<C> {
-        self.clone()
+impl<C: CellType> From<&Expr<C>> for Expr<C> {
+    fn from(val: &Expr<C>) -> Self {
+        val.clone()
     }
 }
 

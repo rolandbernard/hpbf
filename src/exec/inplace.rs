@@ -25,7 +25,7 @@ pub struct InplaceInterpreter<'code, C: CellType> {
     _phantom: PhantomData<C>,
 }
 
-impl<'code, C: CellType> InplaceInterpreter<'code, C> {
+impl<C: CellType> InplaceInterpreter<'_, C> {
     /// Execute the brainfuck program in the given context.
     fn execute_in<const LIMITED: bool>(&self, cxt: &mut Context<C>) -> Result<bool, Error> {
         let code_bytes = self.code.as_bytes();
@@ -112,7 +112,7 @@ impl<'code, C: CellType> Executor<'code, C> for InplaceInterpreter<'code, C> {
     }
 }
 
-impl<'code, C: CellType> Executable<C> for InplaceInterpreter<'code, C> {
+impl<C: CellType> Executable<C> for InplaceInterpreter<'_, C> {
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error> {
         self.execute_in::<false>(context).map(|_| ())
     }

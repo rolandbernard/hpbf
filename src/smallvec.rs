@@ -8,7 +8,7 @@ use std::{
     hash::{Hash, Hasher},
     mem::{self, ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut, Index, IndexMut},
-    ptr, usize,
+    ptr,
 };
 
 /// Internal data of the small vector. Represents either a small array or a standard
@@ -112,21 +112,25 @@ impl<T, const N: usize> SmallVec<T, N> {
 
     /// Insert the given element `elem` at the end of the vector.
     pub fn push(&mut self, elem: T) {
-        if (self.size as usize) < N {
-            // Safety: If `size` <= `N` we have a small representation.
-            unsafe {
-                (*self.data.arr)[self.size as usize].write(elem);
+        match (self.size as usize).cmp(&N) {
+            Ordering::Less => {
+                // Safety: If `size` <= `N` we have a small representation.
+                unsafe {
+                    (*self.data.arr)[self.size as usize].write(elem);
+                }
+                self.size += 1;
             }
-            self.size += 1;
-        } else if self.size as usize == N {
-            // Safety: If `size` <= `N` we have a small representation.
-            unsafe {
-                Self::push_promote(self, elem);
+            Ordering::Equal => {
+                // Safety: If `size` <= `N` we have a small representation.
+                unsafe {
+                    Self::push_promote(self, elem);
+                }
             }
-        } else {
-            // Safety: If `size` > `N` we have a large representation.
-            unsafe {
-                Self::push_to_vec(&mut self.data.vec, elem);
+            Ordering::Greater => {
+                // Safety: If `size` > `N` we have a large representation.
+                unsafe {
+                    Self::push_to_vec(&mut self.data.vec, elem);
+                }
             }
         }
     }
@@ -163,7 +167,9 @@ impl<T, const N: usize> SmallVec<T, N> {
         if (self.size as usize) <= N {
             // Safety: If `size` <= `N` we have a small representation.
             // The first `size` elements are initialized.
-            unsafe { mem::transmute(&(*self.data.arr)[..self.size as usize]) }
+            unsafe {
+                mem::transmute::<&[MaybeUninit<T>], &[T]>(&(*self.data.arr)[..self.size as usize])
+            }
         } else {
             // Safety: If `size` > `N` we have a large representation.
             unsafe { &self.data.vec }
@@ -175,7 +181,11 @@ impl<T, const N: usize> SmallVec<T, N> {
         if (self.size as usize) <= N {
             // Safety: If `size` <= `N` we have a small representation.
             // The first `size` elements are initialized.
-            unsafe { mem::transmute(&mut (*self.data.arr)[..self.size as usize]) }
+            unsafe {
+                mem::transmute::<&mut [MaybeUninit<T>], &mut [T]>(
+                    &mut (*self.data.arr)[..self.size as usize],
+                )
+            }
         } else {
             // Safety: If `size` > `N` we have a large representation.
             unsafe { &mut self.data.vec }
@@ -274,6 +284,12 @@ impl<T, const N: usize> SmallVec<T, N> {
     }
 }
 
+impl<T, const N: usize> Default for SmallVec<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T, const N: usize> Drop for SmallVec<T, N> {
     fn drop(&mut self) {
         if (self.size as usize) <= N {
@@ -324,7 +340,7 @@ impl<T: Eq, const N: usize> Eq for SmallVec<T, N> {}
 
 impl<T: Ord, const N: usize> PartialOrd for SmallVec<T, N> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.as_slice().partial_cmp(other.as_slice())
+        Some(self.cmp(other))
     }
 }
 
@@ -373,10 +389,10 @@ impl<T, const N: usize> Drop for SmallVecIntoIter<T, N> {
         if mem::needs_drop::<T>() {
             match self {
                 SmallVecIntoIter::Small(arr, i, size) => {
-                    for j in *i as usize..*size as usize {
+                    for elem in &mut arr[*i as usize..*size as usize] {
                         // Safety: The first `size` values are initialized, and the
                         // values from `i` onward have not yet been given out.
-                        unsafe { arr[j].assume_init_drop() };
+                        unsafe { elem.assume_init_drop() };
                     }
                 }
                 SmallVecIntoIter::Large(_) => { /* Will be dropped automatically. */ }

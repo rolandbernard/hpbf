@@ -44,7 +44,7 @@ enum ExecutorKind {
 fn print_help_text() {
     println!(
         "Usage: {} [option].. [-f file].. [code]..",
-        env::args().nth(0).unwrap()
+        env::args().next().unwrap()
     );
     println!("Options:");
     println!("   -f,--file file   Read the code from the given file");
@@ -108,60 +108,49 @@ fn execute_code<C: CellType>(
     safe: bool,
 ) -> Result<(), Error> {
     let mut cxt = Context::<C>::with_stdio();
-    let exec: Option<Box<dyn Executable<C>>>;
-    match kind {
+    let exec: Option<Box<dyn Executable<C>>> = match kind {
         ExecutorKind::PrintIr => {
             let program = ir::Program::<C>::parse(code)?;
             let program = program.optimize(opt);
             println!("{program:?}");
-            exec = None;
+            None
         }
         ExecutorKind::PrintBc => {
             let program = ir::Program::<C>::parse(code)?;
             let program = program.optimize(opt);
             let bytecode = bc::CodeGen::translate(&program, 2, true);
             println!("{bytecode:?}");
-            exec = None;
+            None
         }
         ExecutorKind::PrintBc2 => {
             let program = ir::Program::<C>::parse(code)?;
             let program = program.optimize(opt);
             let bytecode = bc::CodeGen::translate(&program, 12, false);
             println!("{bytecode:?}");
-            exec = None;
+            None
         }
-        ExecutorKind::Inplace => {
-            exec = Some(Box::new(InplaceInterpreter::<C>::create(code, opt)?));
-        }
-        ExecutorKind::IrInt => {
-            exec = Some(Box::new(IrInterpreter::<C>::create(code, opt)?));
-        }
-        ExecutorKind::BcInt => {
-            exec = Some(Box::new(BcInterpreter::<C>::create(code, opt)?));
-        }
+        ExecutorKind::Inplace => Some(Box::new(InplaceInterpreter::<C>::create(code, opt)?)),
+        ExecutorKind::IrInt => Some(Box::new(IrInterpreter::<C>::create(code, opt)?)),
+        ExecutorKind::BcInt => Some(Box::new(BcInterpreter::<C>::create(code, opt)?)),
         #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
         ExecutorKind::PrintMc => {
             let int = BaseJitCompiler::<C>::create(code, opt)?;
             stdout()
                 .write_all(&int.print_mc(limit.is_some(), safe))
                 .unwrap();
-            exec = None;
+            None
         }
         #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-        ExecutorKind::BaseJit => {
-            exec = Some(Box::new(BaseJitCompiler::<C>::create(code, opt)?));
-        }
+        ExecutorKind::BaseJit => Some(Box::new(BaseJitCompiler::<C>::create(code, opt)?)),
         #[cfg(feature = "llvm")]
         ExecutorKind::PrintLlvm => {
             let int = LlvmJitCompiler::<C>::create(code, opt)?;
             println!("{}", int.print_llvm_ir(limit.is_some(), safe)?);
-            exec = None;
+            None
         }
         #[cfg(feature = "llvm")]
-        ExecutorKind::LlvmJit => {
-            exec = Some(Box::new(LlvmJitCompiler::<C>::create(code, opt)?));
-        }
-    }
+        ExecutorKind::LlvmJit => Some(Box::new(LlvmJitCompiler::<C>::create(code, opt)?)),
+    };
     if let Some(exec) = exec {
         if let Some(limit) = limit {
             cxt.budget = limit;
@@ -202,7 +191,7 @@ fn main() {
             next_is_file = false;
             match File::open(&arg) {
                 Ok(mut file) => {
-                    if let Err(_) = file.read_to_string(&mut code) {
+                    if file.read_to_string(&mut code).is_err() {
                         print_error(Error {
                             kind: ErrorKind::FileEncodingError,
                             str: arg,

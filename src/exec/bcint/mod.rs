@@ -77,7 +77,7 @@ impl<C: CellType> BcInterpreter<C> {
                 adjust_branch(&mut insts[inst_offset[i]..], offset);
             }
         }
-        return insts;
+        insts
     }
 
     /// Build the context required for the threaded code interpreter.
@@ -130,11 +130,11 @@ impl<C: CellType> BcInterpreter<C> {
         }
         let mut def_cxt = self.free_context(ops_cxt);
         mem::swap(cxt, &mut def_cxt);
-        return finished;
+        finished
     }
 }
 
-impl<'code, C: CellType> Executor<'code, C> for BcInterpreter<C> {
+impl<C: CellType> Executor<'_, C> for BcInterpreter<C> {
     fn create(code: &str, opt: u32) -> Result<Self, Error> {
         let mut program = ir::Program::<C>::parse(code)?;
         program = program.optimize(opt);

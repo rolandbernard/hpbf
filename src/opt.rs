@@ -74,7 +74,7 @@ struct OptDseState<'a, C: CellType> {
     written: HashSet<isize>,
 }
 
-impl<'a, C: CellType> OptLoop<C> {
+impl<C: CellType> OptLoop<C> {
     /// Runs exactly as often as indicated by `expr` evaluated before the loop.
     fn expr(expr: Expr<C>) -> Self {
         let constant = expr.constant();
@@ -179,7 +179,7 @@ impl<'a, C: CellType> OptLoop<C> {
     }
 }
 
-impl<'a, C: CellType> OptRebuild<'a, C> {
+impl<C: CellType> OptRebuild<'_, C> {
     /// Remove the pending operation for the variable `var`. Return the operation
     /// that was pending, if there was any.
     fn remove_pending(&mut self, var: isize) -> Option<Expr<C>> {
@@ -204,7 +204,7 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
         if !self.compare_written_no_parent(Expr::var(var), &expr) {
             let expr = expr.normalize();
             for v in expr.variables().filter(|&x| x != var) {
-                let users = self.reverse.entry(v).or_insert(HashSet::new());
+                let users = self.reverse.entry(v).or_default();
                 users.insert(var);
             }
             self.pending.insert(var, expr);
@@ -253,11 +253,7 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
     /// return that cell. Otherwise return [`None`].
     fn retarget_output(&self, var: isize) -> Option<isize> {
         if let Some(expr) = self.pending.get(&var) {
-            if let Some(var) = expr.identity() {
-                Some(var)
-            } else {
-                None
-            }
+            expr.identity()
         } else {
             Some(var)
         }
@@ -407,7 +403,7 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
                 comps.push(new_comp);
             }
         }
-        return low;
+        low
     }
 
     /// Emitting a pending operation might necessitate either emitting or adjusting
@@ -432,7 +428,7 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
                 }
             }
         }
-        return comps;
+        comps
     }
 
     /// Record the execution of the given operations.
@@ -683,14 +679,12 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
                     } else {
                         OptLoop::infinite(at_least_once)
                     }
+                } else if let Some(inv) = inc.wrapping_neg().wrapping_inv() {
+                    OptLoop::expr(Expr::val(inv).mul(Expr::var(cond)))
+                } else if inc == C::ZERO {
+                    OptLoop::infinite(at_least_once)
                 } else {
-                    if let Some(inv) = inc.wrapping_neg().wrapping_inv() {
-                        OptLoop::expr(Expr::val(inv).mul(Expr::var(cond)))
-                    } else if inc == C::ZERO {
-                        OptLoop::infinite(at_least_once)
-                    } else {
-                        OptLoop::unknown(at_least_once)
-                    }
+                    OptLoop::unknown(at_least_once)
                 }
             } else if expr.identity() == Some(cond) {
                 OptLoop::infinite(at_least_once)
@@ -720,76 +714,73 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
         }
         let pending = self.reduce_const(pending, constant);
         let used_vars = pending.variables().collect::<HashSet<_>>();
-        if !reads.contains(&var) || loop_anal.at_most_once {
-            if used_vars
+        if (!reads.contains(&var) || loop_anal.at_most_once)
+            && used_vars
                 .iter()
                 .all(|x| !other_pending.contains(x) || constant.contains(x))
-            {
-                return [None, None, Some(pending)];
-            }
+        {
+            return [None, None, Some(pending)];
         }
-        if !reads.contains(&var) {
-            if complete {
-                if let Some(expr) = &loop_anal.expr {
-                    if let Some((inc, mul)) = pending.prod_inc_of(var) {
-                        if mul == C::ONE {
-                            let (constant, other, linears) = inc.split_along(constant, linear);
-                            let mut before = expr.mul(constant);
-                            let mut after = other;
-                            let expr_neg_one = expr.add(Expr::val(C::NEG_ONE));
-                            for (initial, increment) in linears {
-                                if let Some(inc) = increment.half() {
-                                    before = expr
-                                        .mul(initial)
-                                        .add(before.add(expr.mul(expr_neg_one.mul(inc))));
-                                } else if let Some(inc) = expr.half() {
-                                    before = expr
-                                        .mul(initial)
-                                        .add(before.add(expr_neg_one.mul(increment.mul(inc))));
-                                } else if let Some(inc) = expr_neg_one.half() {
-                                    before = expr
-                                        .mul(initial)
-                                        .add(before.add(expr.mul(increment.mul(inc))));
-                                } else {
-                                    after = after.add(initial);
-                                }
+        if !reads.contains(&var) && complete {
+            if let Some(expr) = &loop_anal.expr {
+                if let Some((inc, mul)) = pending.prod_inc_of(var) {
+                    if mul == C::ONE {
+                        let (constant, other, linears) = inc.split_along(constant, linear);
+                        let mut before = expr.mul(constant);
+                        let mut after = other;
+                        let expr_neg_one = expr.add(Expr::val(C::NEG_ONE));
+                        for (initial, increment) in linears {
+                            if let Some(inc) = increment.half() {
+                                before = expr
+                                    .mul(initial)
+                                    .add(before.add(expr.mul(expr_neg_one.mul(inc))));
+                            } else if let Some(inc) = expr.half() {
+                                before = expr
+                                    .mul(initial)
+                                    .add(before.add(expr_neg_one.mul(increment.mul(inc))));
+                            } else if let Some(inc) = expr_neg_one.half() {
+                                before = expr
+                                    .mul(initial)
+                                    .add(before.add(expr.mul(increment.mul(inc))));
+                            } else {
+                                after = after.add(initial);
                             }
+                        }
+                        return [
+                            Some(Expr::var(var).add(before)),
+                            Some(Expr::var(var).add(after)),
+                            None,
+                        ];
+                    } else if let Some(c) = expr.constant() {
+                        if inc.is_zero() {
                             return [
-                                Some(Expr::var(var).add(before)),
-                                Some(Expr::var(var).add(after)),
+                                Some(Expr::val(mul.wrapping_pow(c)).mul(Expr::var(var))),
+                                None,
                                 None,
                             ];
-                        } else if let Some(c) = expr.constant() {
-                            if inc.is_zero() {
+                        } else if inc.variables().all(|x| constant.contains(&x)) {
+                            if let Some(m) = mul
+                                .wrapping_pow(c)
+                                .wrapping_mul(mul)
+                                .wrapping_add(C::NEG_ONE)
+                                .wrapping_div(mul.wrapping_add(C::NEG_ONE))
+                            {
                                 return [
-                                    Some(Expr::val(mul.wrapping_pow(c)).mul(Expr::var(var))),
+                                    Some(
+                                        Expr::val(mul.wrapping_pow(c))
+                                            .mul(Expr::var(var))
+                                            .add(Expr::val(m).mul(inc)),
+                                    ),
                                     None,
                                     None,
                                 ];
-                            } else if inc.variables().all(|x| constant.contains(&x)) {
-                                if let Some(m) = mul
-                                    .wrapping_pow(c)
-                                    .wrapping_mul(mul)
-                                    .wrapping_add(C::NEG_ONE)
-                                    .wrapping_div(mul.wrapping_add(C::NEG_ONE))
-                                {
-                                    return [
-                                        Some(
-                                            Expr::val(mul.wrapping_pow(c))
-                                                .mul(Expr::var(var))
-                                                .add(Expr::val(m).mul(inc)),
-                                        ),
-                                        None,
-                                        None,
-                                    ];
-                                }
                             }
                         }
                     }
                 }
             }
         }
-        return [None, Some(pending), None];
+        [None, Some(pending), None]
     }
 
     /// Emit a loop if necessary, otherwise either inline or perform a load.
@@ -811,7 +802,7 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
         {
             self.perform_all(0, &[(cond, Expr::val(C::ZERO))]);
         } else {
-            self.loop_or_if(sub_state, cond, true, loop_anal, &constant);
+            self.loop_or_if(sub_state, cond, true, loop_anal, constant);
         }
         self.perform_all(0, &after);
     }
@@ -819,12 +810,12 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
     /// Inline the given `sub_state` into this state.
     fn inline(&mut self, mut sub_state: OptRebuild<C>) {
         if sub_state.sub_shift {
-            for var in self.pending(&self) {
+            for var in self.pending(self) {
                 self.emit(var);
             }
             self.uncertain_shift();
         } else {
-            for var in sub_state.reads(&self) {
+            for var in sub_state.reads(self) {
                 self.emit(var);
                 self.read(var);
             }
@@ -876,13 +867,13 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
         let mut clobbered = HashSet::new();
         let has_shift = sub_state.sub_shift || sub_state.shift != self.shift;
         if has_shift {
-            for var in self.pending(&self) {
+            for var in self.pending(self) {
                 self.emit(var);
             }
             self.uncertain_shift();
         } else {
             sub_state.reads.insert(cond);
-            let sub_reads = sub_state.reads(&self);
+            let sub_reads = sub_state.reads(self);
             for var in sub_reads {
                 self.emit(var);
                 self.read(var);
@@ -966,7 +957,7 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
             } else {
                 let mut cnt = 0;
                 for v in iter().filter(|&x| x != var) {
-                    dependents.entry(v).or_insert(Vec::new()).push(var);
+                    dependents.entry(v).or_default().push(var);
                     cnt += 1;
                 }
                 depends_on.insert(var, cnt);
@@ -1028,7 +1019,7 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
                 }
             }
         }
-        return constant;
+        constant
     }
 
     /// Find the variables that only increment by an expression using only
@@ -1049,7 +1040,7 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
                 }
             }
         }
-        return linear;
+        linear
     }
 
     /// Get a sorted list of all variables with pending operations.
@@ -1062,7 +1053,7 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
                 (0, *x)
             }
         });
-        return vars;
+        vars
     }
 
     /// Get a sorted list of all variables which have been read by this block.
@@ -1075,7 +1066,7 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
                 (0, *x)
             }
         });
-        return vars;
+        vars
     }
 }
 
@@ -1149,7 +1140,7 @@ impl<'a, C: CellType> OptRebuild<'a, C> {
                         None
                     };
                     let mut sub_state =
-                        OptRebuild::new(self.shift, Some(cond), OptParent::Parent(&self), sub_anal);
+                        OptRebuild::new(self.shift, Some(cond), OptParent::Parent(self), sub_anal);
                     sub_state.rebuild_block(block);
                     let loop_anal = self.analyze_loop(&sub_state, cond, is_loop);
                     if !loop_anal.never {
@@ -1378,7 +1369,7 @@ impl<C: CellType> Program<C> {
                 prog.dead_store_elimination(&anal);
                 (prog, anal) = prog.optimize_once(anal);
             }
-            return prog;
+            prog
         } else {
             self.clone()
         }

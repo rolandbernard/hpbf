@@ -31,6 +31,9 @@ pub trait Executable<C: CellType> {
     fn execute(&self, context: &mut Context<C>) -> Result<(), Error>;
 
     /// Execute the executor in the given [`Context`] without performing memory bounds checks.
+    ///
+    /// # Safety
+    /// This is only safe if the program does not leave the preallocated memory bounds.
     unsafe fn execute_unsafe(&self, context: &mut Context<C>) -> Result<(), Error> {
         self.execute(context)
     }

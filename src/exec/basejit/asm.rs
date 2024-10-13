@@ -82,7 +82,7 @@ impl CodeGen {
                     .push(0xc0 + (op << 3) + (reg.unwrap_or(Reg::Rax).enc() << 3) + r.enc());
             }
             RegMem::Mem(base, idx, mul, disp) => {
-                let is_small = disp <= 127 && disp >= -128 && base.is_some();
+                let is_small = (-128..=127).contains(&disp) && base.is_some();
                 let is_zero = disp == 0 && base.is_some() && base.unwrap().enc() != 5;
                 let mode = ((!is_zero && base.is_some()) as u8) << (6 + !is_small as u32);
                 let modrm = mode + (op << 3) + (reg.unwrap_or(Reg::Rax).enc() << 3);
@@ -124,7 +124,7 @@ impl CodeGen {
         } else if imm == 1 {
             self.emit_inc_rm64(rm);
         } else {
-            let is_small = imm <= 127 && imm >= -128;
+            let is_small = (-128..=127).contains(&imm);
             self.emit_rex(true, false, None, rm);
             self.code.push(if is_small { 0x83 } else { 0x81 });
             self.emit_modrm(None, 0, rm);
@@ -143,7 +143,7 @@ impl CodeGen {
         } else if imm == 1 {
             self.emit_inc_rm32(rm);
         } else {
-            let is_small = imm <= 127 && imm >= -128;
+            let is_small = (-128..=127).contains(&imm);
             self.emit_rex(false, false, None, rm);
             self.code.push(if is_small { 0x83 } else { 0x81 });
             self.emit_modrm(None, 0, rm);
@@ -162,7 +162,7 @@ impl CodeGen {
         } else if imm == 1 {
             self.emit_inc_rm16(rm);
         } else {
-            let is_small = imm <= 127 && imm >= -128;
+            let is_small = (-128..=127).contains(&imm);
             self.code.push(0x66);
             self.emit_rex(false, false, None, rm);
             self.code.push(if is_small { 0x83 } else { 0x81 });
@@ -245,7 +245,7 @@ impl CodeGen {
         } else if imm == -1 {
             self.emit_inc_rm64(rm);
         } else {
-            let is_small = imm <= 127 && imm >= -128;
+            let is_small = (-128..=127).contains(&imm);
             self.emit_rex(true, false, None, rm);
             self.code.push(if is_small { 0x83 } else { 0x81 });
             self.emit_modrm(None, 5, rm);
@@ -309,7 +309,7 @@ impl CodeGen {
 
     /// Automatically selects between the 32 bit or 8 bit immediate version.
     pub fn emit_mul_r64_rm64_i32(&mut self, dst: Reg, rm: RegMem, imm: i32) {
-        let is_small = imm <= 127 && imm >= -128;
+        let is_small = (-128..=127).contains(&imm);
         self.emit_rex(true, false, Some(dst), rm);
         self.code.push(if is_small { 0x6b } else { 0x69 });
         self.emit_modrm(Some(dst), 0, rm);

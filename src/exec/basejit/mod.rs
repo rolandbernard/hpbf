@@ -100,7 +100,7 @@ impl<C: CellType> BaseJitCompiler<C> {
             );
             ptr::copy_nonoverlapping(code.as_ptr(), code_mem, code.len());
             let mem_ptr = cxt.memory.current_ptr();
-            let entry = mem::transmute::<_, HpbfEntry<C>>(code_mem);
+            let entry = mem::transmute::<*mut u8, HpbfEntry<C>>(code_mem);
             result = entry(cxt, mem_ptr);
             assert!(
                 libc::munmap(code_mem as *mut _, len) == 0,
@@ -111,13 +111,13 @@ impl<C: CellType> BaseJitCompiler<C> {
     }
 
     /// Execute in the given context using the JIT compiler.
-    fn execute_in<'a>(&self, cxt: &mut Context<'a, C>, limited: bool, safe: bool) -> bool {
+    fn execute_in(&self, cxt: &mut Context<C>, limited: bool, safe: bool) -> bool {
         let code = self.compile_program(limited, safe);
         self.enter_jit_code(cxt, code)
     }
 }
 
-impl<'code, C: CellType> Executor<'code, C> for BaseJitCompiler<C> {
+impl<C: CellType> Executor<'_, C> for BaseJitCompiler<C> {
     fn create(code: &str, opt: u32) -> Result<Self, Error> {
         let mut program = ir::Program::<C>::parse(code)?;
         program = program.optimize(opt);

@@ -345,7 +345,10 @@ impl CodeGen {
                         self.emit_mov_rm64_r64(RegMem::Reg(Reg::Rdi), Reg::cxt());
                         self.emit_mov_r64_i64(Reg::Rsi, 0);
                         self.emit_mov_r64_i64(Reg::Rdx, 1);
-                        self.emit_mov_r64_i64(Reg::scr0(), hpbf_context_extend::<C> as i64);
+                        self.emit_mov_r64_i64(
+                            Reg::scr0(),
+                            hpbf_context_extend::<C> as usize as i64,
+                        );
                         self.emit_call_ind(RegMem::Reg(Reg::scr0()));
                         self.emit_post_call(live);
                         self.emit_mov_r64_rm64(
@@ -371,7 +374,7 @@ impl CodeGen {
                 Instr::Inp(dst) => {
                     self.emit_pre_call(live);
                     self.emit_mov_rm64_r64(RegMem::Reg(Reg::Rdi), Reg::cxt());
-                    self.emit_mov_r64_i64(Reg::scr0(), hpbf_context_input::<C> as i64);
+                    self.emit_mov_r64_i64(Reg::scr0(), hpbf_context_input::<C> as usize as i64);
                     self.emit_call_ind(RegMem::Reg(Reg::scr0()));
                     self.emit_post_call(live);
                     self.emit_store_reg::<C>(dst, Reg::Rax);
@@ -380,7 +383,7 @@ impl CodeGen {
                     self.emit_pre_call(live);
                     self.emit_mov_rm64_r64(RegMem::Reg(Reg::Rdi), Reg::cxt());
                     self.emit_load::<C>(src, Reg::Rsi);
-                    self.emit_mov_r64_i64(Reg::scr0(), hpbf_context_output::<C> as i64);
+                    self.emit_mov_r64_i64(Reg::scr0(), hpbf_context_output::<C> as usize as i64);
                     self.emit_call_ind(RegMem::Reg(Reg::scr0()));
                     self.emit_post_call(live);
                     self.emit_test_rm8_r8(RegMem::Reg(Reg::Rax), Reg::Rax);

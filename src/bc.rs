@@ -159,7 +159,7 @@ impl Analysis {
         if block.shift != 0 {
             anal.has_shift = true;
         }
-        return anal;
+        anal
     }
 }
 
@@ -199,12 +199,11 @@ impl<C: CellType> CodeGen<C> {
 
     /// Like a read, but does not increment the uses counter, only extends the range.
     fn range_extend(&mut self, value: usize) {
-        if self.ranges[value].created < self.current_start {
-            if self.ranges[value].last_use.is_none()
-                || self.ranges[value].last_use.unwrap() < self.current_start
-            {
-                self.outer_accessed.push(value);
-            }
+        if self.ranges[value].created < self.current_start
+            && (self.ranges[value].last_use.is_none()
+                || self.ranges[value].last_use.unwrap() < self.current_start)
+        {
+            self.outer_accessed.push(value);
         }
         self.range_extend_to(value, self.insts.len());
     }
@@ -256,10 +255,7 @@ impl<C: CellType> CodeGen<C> {
     /// the value of the given temporary `value`.
     fn mem_write(&mut self, var: isize, value: usize) {
         self.read(value);
-        self.writes
-            .entry(var)
-            .or_insert(BTreeSet::new())
-            .insert(self.insts.len());
+        self.writes.entry(var).or_default().insert(self.insts.len());
         self.values.insert(GvnExpr::Mem(var), value);
         self.insts.push(Instr::Copy(Loc::Mem(var), Loc::Tmp(value)));
     }
@@ -278,7 +274,7 @@ impl<C: CellType> CodeGen<C> {
                     self.values.remove(&GvnExpr::Mem(*dst));
                     self.writes
                         .entry(*dst)
-                        .or_insert(BTreeSet::new())
+                        .or_default()
                         .insert(self.insts.len());
                     self.insts.push(Instr::Inp(*dst));
                 }
@@ -399,17 +395,15 @@ impl<C: CellType> CodeGen<C> {
                         }
                     }
                 }
-                Instr::Copy(dst, src) => {
-                    if let Loc::Mem(mem) = dst {
-                        if dead.contains(&mem) {
-                            if let Loc::Tmp(tmp) = src {
-                                self.ranges[tmp].num_uses -= 1;
-                            }
-                            self.insts[i] = Instr::Noop;
-                            continue;
+                Instr::Copy(Loc::Mem(mem), src) => {
+                    if dead.contains(&mem) {
+                        if let Loc::Tmp(tmp) = src {
+                            self.ranges[tmp].num_uses -= 1;
                         }
-                        dead.insert(mem);
+                        self.insts[i] = Instr::Noop;
+                        continue;
                     }
+                    dead.insert(mem);
                 }
                 _ => { /* No store here. */ }
             }
@@ -608,34 +602,30 @@ impl<C: CellType> CodeGen<C> {
                         }
                     }
                 }
-                Instr::Copy(dst, src) => {
-                    if let Loc::Tmp(tmp) = dst {
-                        if let Some(last_use) = self.ranges[tmp].last_use {
-                            let num_uses = self.ranges[tmp].num_uses;
-                            if num_uses == 0 {
+                Instr::Copy(Loc::Tmp(tmp), src) => {
+                    if let Some(last_use) = self.ranges[tmp].last_use {
+                        let num_uses = self.ranges[tmp].num_uses;
+                        if num_uses == 0 {
+                            self.insts[i] = Instr::Noop;
+                        } else if let Loc::Imm(_) = src {
+                            replacements.insert(tmp, src);
+                            next_range_end.push((Reverse(last_use), tmp));
+                            self.insts[i] = Instr::Noop;
+                        } else if let Loc::Mem(mem) = src {
+                            if (num_uses == 1 || !can_alloc_reg)
+                                && !self.has_write_in_range(mem, i, last_use)
+                            {
+                                replacements.insert(tmp, src);
+                                next_range_end.push((Reverse(last_use), tmp));
                                 self.insts[i] = Instr::Noop;
                             } else {
-                                if let Loc::Imm(_) = src {
-                                    replacements.insert(tmp, src);
-                                    next_range_end.push((Reverse(last_use), tmp));
-                                    self.insts[i] = Instr::Noop;
-                                } else if let Loc::Mem(mem) = src {
-                                    if (num_uses == 1 || !can_alloc_reg)
-                                        && !self.has_write_in_range(mem, i, last_use)
-                                    {
-                                        replacements.insert(tmp, src);
-                                        next_range_end.push((Reverse(last_use), tmp));
-                                        self.insts[i] = Instr::Noop;
-                                    } else {
-                                        alloc_temp(&mut self.insts[i]);
-                                    }
-                                } else {
-                                    alloc_temp(&mut self.insts[i]);
-                                }
+                                alloc_temp(&mut self.insts[i]);
                             }
                         } else {
-                            self.insts[i] = Instr::Noop;
+                            alloc_temp(&mut self.insts[i]);
                         }
+                    } else {
+                        self.insts[i] = Instr::Noop;
                     }
                 }
                 _ => { /* These do not access temps. */ }
@@ -663,10 +653,8 @@ impl<C: CellType> CodeGen<C> {
                 _ => { /* Handled below. */ }
             }
             match self.insts[i] {
-                Instr::Sub(dst, src0, src1) => {
-                    if let Loc::Imm(imm) = src1 {
-                        self.insts[i] = Instr::Add(dst, src0, Loc::Imm(imm.wrapping_neg()));
-                    }
+                Instr::Sub(dst, src0, Loc::Imm(imm)) => {
+                    self.insts[i] = Instr::Add(dst, src0, Loc::Imm(imm.wrapping_neg()));
                 }
                 _ => { /* Handled below. */ }
             }
@@ -872,10 +860,8 @@ impl<C: CellType> Instr<C> {
                     }
                 }
             }
-            Instr::Copy(_, src) => {
-                if let Loc::MemZero(mem) = src {
-                    write!(f, " & copy [{mem}], 0")?;
-                }
+            Instr::Copy(_, Loc::MemZero(mem)) => {
+                write!(f, " & copy [{mem}], 0")?;
             }
             _ => { /* These have no locations. */ }
         }

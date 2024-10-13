@@ -78,7 +78,7 @@ fn llvm_error<S: ToString>(str: S) -> Error {
     }
 }
 
-impl<'a, 'b: 'c, 'c, C: CellType> ir::CodeGen<C> for LlvmCodeGenCalc<'a, 'b, 'c, C> {
+impl<'b: 'c, 'c, C: CellType> ir::CodeGen<C> for LlvmCodeGenCalc<'_, 'b, 'c, C> {
     type Output = IntValue<'c>;
     type Error = BuilderError;
 
@@ -803,7 +803,7 @@ impl<C: CellType> LlvmJitCompiler<C> {
     }
 }
 
-impl<'p, C: CellType> Executor<'p, C> for LlvmJitCompiler<C> {
+impl<C: CellType> Executor<'_, C> for LlvmJitCompiler<C> {
     fn create(code: &str, opt: u32) -> Result<Self, Error> {
         let mut program = Program::<C>::parse(code)?;
         program = program.optimize(opt);

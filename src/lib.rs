@@ -86,7 +86,7 @@ pub trait CellType: Copy + Ord + Hash + Debug + 'static {
             self = self.wrapping_mul(self);
             exp = exp.wrapping_shr(1);
         }
-        return result;
+        result
     }
 
     /// Compute the multiplicative inverse of `self`. Unlike [`Self::wrapping_div`],
