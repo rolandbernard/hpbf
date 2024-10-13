@@ -371,7 +371,7 @@ impl<C: CellType> OptRebuild<'_, C> {
         var: isize,
         index: &mut usize,
         visited: &mut HashMap<isize, usize>,
-        stack: &mut Vec<(isize, Option<Expr<C>>)>,
+        stack: &mut Vec<isize>,
         comps: &mut Vec<SmallVec<(isize, Expr<C>), 1>>,
     ) -> usize {
         let cur_index = *index;
@@ -389,14 +389,14 @@ impl<C: CellType> OptRebuild<'_, C> {
                 }
             }
         }
-        stack.push((var, self.remove_pending(var)));
+        stack.push(var);
         if low == cur_index {
             let mut new_comp = SmallVec::with_capacity(stack.len() - stack_len);
             while stack.len() != stack_len {
-                let elem = stack.pop().unwrap();
-                visited.insert(elem.0, usize::MAX);
-                if let Some(expr) = elem.1 {
-                    new_comp.push((elem.0, expr));
+                let var = stack.pop().unwrap();
+                visited.insert(var, usize::MAX);
+                if let Some(expr) = self.remove_pending(var) {
+                    new_comp.push((var, expr));
                 }
             }
             if !new_comp.is_empty() {

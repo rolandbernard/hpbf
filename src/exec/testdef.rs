@@ -362,6 +362,11 @@ macro_rules! same_as_inplace_tests {
                 <+>-]<]<++[>+<-]>[-[>+<<++>-]<+>>[<+>-]<]<.<<<[-]+]",
                 very_large_polynomial
             );
+            same_as_inplace_test_no_miri!(
+                $i,
+                ",>,>,>,[[-]<<[->>+<<]<[->+>>+<<<]>>[-<<+>>]>[-<+>]>].<.<.<.<.<.<.<.<.<.<.<.",
+                single_connected_component
+            );
         }
     };
 }
