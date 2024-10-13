@@ -394,7 +394,6 @@ impl<C: CellType> OptRebuild<'_, C> {
             let mut new_comp = SmallVec::with_capacity(stack.len() - stack_len);
             while stack.len() != stack_len {
                 let var = stack.pop().unwrap();
-                visited.insert(var, usize::MAX);
                 if let Some(expr) = self.remove_pending(var) {
                     new_comp.push((var, expr));
                 }

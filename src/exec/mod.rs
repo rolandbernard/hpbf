@@ -9,20 +9,20 @@ mod bcint;
 mod inplace;
 mod irint;
 
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+#[cfg(all(not(miri), target_arch = "x86_64", target_family = "unix"))]
 mod basejit;
 
-#[cfg(feature = "llvm")]
+#[cfg(all(not(miri), feature = "llvm"))]
 mod llvmjit;
 
 pub use bcint::BcInterpreter;
 pub use inplace::InplaceInterpreter;
 pub use irint::IrInterpreter;
 
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+#[cfg(all(not(miri), target_arch = "x86_64", target_family = "unix"))]
 pub use basejit::BaseJitCompiler;
 
-#[cfg(feature = "llvm")]
+#[cfg(all(not(miri), feature = "llvm"))]
 pub use llvmjit::LlvmJitCompiler;
 
 /// Trait implemented by the different execution strategies provided by this crate.

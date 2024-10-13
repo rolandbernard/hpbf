@@ -288,7 +288,7 @@ unsafe fn noop<C: CellType>(
     temps_ptr(cxt).add(0).write(r0);
     temps_ptr(cxt).add(1).write(r1);
     (*cxt).context.memory.set_current_ptr(mem);
-    ip.add(1)
+    ip
 }
 
 /// Noop instruction that does not change the virtual machine state. In release mode,
@@ -303,7 +303,6 @@ unsafe fn noop<C: CellType>(
     r0: C,
     r1: C,
 ) -> *const OpCode<C> {
-    ip = ip.add(1);
     ((*ip).op)(cxt, mem, ip, r0, r1)
 }
 
@@ -366,7 +365,7 @@ unsafe fn scanl<C: CellType, const SAFE: bool>(
             mem = mem.offset(shift);
         }
     }
-    noop(cxt, mem, ip.add(2), r0, r1)
+    noop(cxt, mem, ip.add(3), r0, r1)
 }
 
 /// Move the memory pointer to the right until the condition is false.
@@ -386,7 +385,7 @@ unsafe fn scanr<C: CellType, const SAFE: bool>(
             mem = mem.offset(shift);
         }
     }
-    noop(cxt, mem, ip.add(2), r0, r1)
+    noop(cxt, mem, ip.add(3), r0, r1)
 }
 
 /// Move the memory pointer to the left and perform bounds checks.
@@ -403,7 +402,7 @@ unsafe fn movl<C: CellType, const SAFE: bool>(
     } else {
         mem = mem.offset(shift);
     }
-    noop(cxt, mem, ip.add(1), r0, r1)
+    noop(cxt, mem, ip.add(2), r0, r1)
 }
 
 /// Move the memory pointer to the right and perform bounds checks.
@@ -420,7 +419,7 @@ unsafe fn movr<C: CellType, const SAFE: bool>(
     } else {
         mem = mem.offset(shift);
     }
-    noop(cxt, mem, ip.add(1), r0, r1)
+    noop(cxt, mem, ip.add(2), r0, r1)
 }
 
 /// Input from the input stream and save the value at a given memory location.
@@ -435,7 +434,7 @@ unsafe fn input<C: CellType>(
         let val = C::from_u8(inp);
         let dst = (*ip.add(1)).off;
         *mem.offset(dst) = val;
-        noop(cxt, mem, ip.add(1), r0, r1)
+        noop(cxt, mem, ip.add(2), r0, r1)
     } else {
         ptr::null()
     }
@@ -452,7 +451,7 @@ unsafe fn output<C: CellType>(
     let src = (*ip.add(1)).off;
     let val = *mem.offset(src);
     if let Some(()) = (*cxt).context.output(val.into_u8()) {
-        noop(cxt, mem, ip.add(1), r0, r1)
+        noop(cxt, mem, ip.add(2), r0, r1)
     } else {
         ptr::null()
     }
@@ -470,9 +469,9 @@ unsafe fn brz<C: CellType>(
     let cond = (*ip.add(1)).off;
     if *mem.offset(cond) == C::ZERO {
         let off = (*ip.add(2)).off;
-        noop(cxt, mem, ip.offset(off - 1), r0, r1)
+        noop(cxt, mem, ip.offset(off), r0, r1)
     } else {
-        noop(cxt, mem, ip.add(2), r0, r1)
+        noop(cxt, mem, ip.add(3), r0, r1)
     }
 }
 
@@ -488,9 +487,9 @@ unsafe fn brnz<C: CellType>(
     let cond = (*ip.add(1)).off;
     if *mem.offset(cond) != C::ZERO {
         let off = (*ip.add(2)).off;
-        noop(cxt, mem, ip.offset(off - 1), r0, r1)
+        noop(cxt, mem, ip.offset(off), r0, r1)
     } else {
-        noop(cxt, mem, ip.add(2), r0, r1)
+        noop(cxt, mem, ip.add(3), r0, r1)
     }
 }
 
@@ -507,7 +506,7 @@ unsafe fn add<C: CellType, Dst: OpWrite<C>, Src: OpRead<C>>(
     ip = ip.add(Dst::SHIFT);
     let val1 = Dst::read(cxt, mem, ip, r0, r1);
     (r0, r1) = Dst::write(cxt, mem, ip, r0, r1, val0.wrapping_add(val1));
-    noop(cxt, mem, ip, r0, r1)
+    noop(cxt, mem, ip.add(1), r0, r1)
 }
 
 /// Store the result of adding `Src0` and `Src1` into `Dst`.
@@ -524,7 +523,7 @@ unsafe fn add2<C: CellType, Dst: OpWrite<C>, Src0: OpRead<C>, Src1: OpRead<C>>(
     let val1 = Src1::read(cxt, mem, ip, r0, r1);
     ip = ip.add(Dst::SHIFT);
     (r0, r1) = Dst::write(cxt, mem, ip, r0, r1, val0.wrapping_add(val1));
-    noop(cxt, mem, ip, r0, r1)
+    noop(cxt, mem, ip.add(1), r0, r1)
 }
 
 /// Store the result of subtracting `Src` from `Dst` into `Dst`.
@@ -540,7 +539,7 @@ unsafe fn sub<C: CellType, Dst: OpWrite<C>, Src: OpRead<C>>(
     ip = ip.add(Dst::SHIFT);
     let val1 = Dst::read(cxt, mem, ip, r0, r1);
     (r0, r1) = Dst::write(cxt, mem, ip, r0, r1, val1.wrapping_add(val0.wrapping_neg()));
-    noop(cxt, mem, ip, r0, r1)
+    noop(cxt, mem, ip.add(1), r0, r1)
 }
 
 /// Store the result of subtracting `Src1` from `Src0` into `Dst`.
@@ -557,7 +556,7 @@ unsafe fn sub2<C: CellType, Dst: OpWrite<C>, Src0: OpRead<C>, Src1: OpRead<C>>(
     let val1 = Src1::read(cxt, mem, ip, r0, r1);
     ip = ip.add(Dst::SHIFT);
     (r0, r1) = Dst::write(cxt, mem, ip, r0, r1, val0.wrapping_add(val1.wrapping_neg()));
-    noop(cxt, mem, ip, r0, r1)
+    noop(cxt, mem, ip.add(1), r0, r1)
 }
 
 /// Store the result of multiplying `Dst` and `Src` into `Dst`.
@@ -573,7 +572,7 @@ unsafe fn mul<C: CellType, Dst: OpWrite<C>, Src: OpRead<C>>(
     ip = ip.add(Dst::SHIFT);
     let val1 = Dst::read(cxt, mem, ip, r0, r1);
     (r0, r1) = Dst::write(cxt, mem, ip, r0, r1, val0.wrapping_mul(val1));
-    noop(cxt, mem, ip, r0, r1)
+    noop(cxt, mem, ip.add(1), r0, r1)
 }
 
 /// Store the result of multiplying `Src0` and `Src1` into `Dst`.
@@ -590,7 +589,7 @@ unsafe fn mul2<C: CellType, Dst: OpWrite<C>, Src0: OpRead<C>, Src1: OpRead<C>>(
     let val1 = Src1::read(cxt, mem, ip, r0, r1);
     ip = ip.add(Dst::SHIFT);
     (r0, r1) = Dst::write(cxt, mem, ip, r0, r1, val0.wrapping_mul(val1));
-    noop(cxt, mem, ip, r0, r1)
+    noop(cxt, mem, ip.add(1), r0, r1)
 }
 
 /// Store the value of `Src` into `Dst`.
@@ -605,7 +604,7 @@ unsafe fn copy<C: CellType, Dst: OpWrite<C>, Src: OpRead<C>>(
     let val = Src::read(cxt, mem, ip, r0, r1);
     ip = ip.add(Dst::SHIFT);
     (r0, r1) = Dst::write(cxt, mem, ip, r0, r1, val);
-    noop(cxt, mem, ip, r0, r1)
+    noop(cxt, mem, ip.add(1), r0, r1)
 }
 
 /// Immediately return the program. This returns a null pointer to indicate the
@@ -637,7 +636,7 @@ unsafe fn limit<C: CellType>(
         ip.add(2)
     } else {
         (*cxt).context.budget -= cost;
-        noop(cxt, mem, ip.add(1), r0, r1)
+        noop(cxt, mem, ip.add(2), r0, r1)
     }
 }
 

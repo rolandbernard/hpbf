@@ -10,10 +10,13 @@ use std::{
 };
 
 use hpbf::{
-    exec::{BaseJitCompiler, BcInterpreter, Executor, InplaceInterpreter, IrInterpreter},
+    exec::{BcInterpreter, Executor, InplaceInterpreter, IrInterpreter},
     runtime::Context,
     CellType,
 };
+
+#[cfg(all(not(miri), target_arch = "x86_64", target_family = "unix"))]
+use hpbf::exec::BaseJitCompiler;
 
 /// Generate a random Brainfuck program. The program is guaranteed to be syntactically
 /// valid and additionally guarantees that loops are either finite or print some output.
@@ -122,12 +125,15 @@ fn check_code<'code, C: CellType>(code: &'code str) -> bool {
     {
         return false;
     }
-    let bcjit2 = result_with::<C, BaseJitCompiler<C>>(code, 4);
-    if !compare_results(&inplace, &bcjit2)
-        || !compare_results(&irint2, &bcjit2)
-        || !compare_results(&bcint2, &bcjit2)
+    #[cfg(all(not(miri), target_arch = "x86_64", target_family = "unix"))]
     {
-        return false;
+        let bcjit2 = result_with::<C, BaseJitCompiler<C>>(code, 4);
+        if !compare_results(&inplace, &bcjit2)
+            || !compare_results(&irint2, &bcjit2)
+            || !compare_results(&bcint2, &bcjit2)
+        {
+            return false;
+        }
     }
     true
 }
